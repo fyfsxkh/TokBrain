@@ -28,7 +28,7 @@ gmssl==3.2.2
 importlib-resources==6.4.5
 jsonpath-ng==1.6.1
 m3u8==3.6.0
-protobuf==5.29.6
+protobuf==7.35.1
 PyExecJS==1.5.1
 PyYAML==6.0.2
 qrcode==8.0
