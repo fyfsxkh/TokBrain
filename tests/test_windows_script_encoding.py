@@ -38,3 +38,12 @@ def test_setup_checks_node_before_installing_project_dependencies():
     node_check = setup.index("$NodeCommand = Get-Command node")
     pip_install = setup.index("-m pip install --upgrade pip")
     assert node_check < pip_install
+
+
+def test_setup_overrides_inaccessible_global_npm_cache():
+    setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+    assert '$env:LOCALAPPDATA' in setup
+    assert '"TokBrain\\npm-cache"' in setup
+    assert "ci --cache $NpmCachePath" in setup
+    assert "without modifying the user's global npm config" in setup
+    assert "如果仍出现 EPERM" in setup

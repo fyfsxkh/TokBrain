@@ -139,6 +139,25 @@ if ($NodeMajorVersion -lt 22) {
     Stop-Setup "检测到 Node.js $NodeVersionText，但本项目需要 Node.js 22 或更高版本。"
 }
 
+$NpmCacheCandidates = @()
+if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $NpmCacheCandidates += Join-Path $env:LOCALAPPDATA "TokBrain\npm-cache"
+}
+$NpmCacheCandidates += Join-Path $WorkspacePath "data\cache\npm"
+$NpmCachePath = $null
+foreach ($CacheCandidate in $NpmCacheCandidates) {
+    try {
+        [void][System.IO.Directory]::CreateDirectory($CacheCandidate)
+        $NpmCachePath = $CacheCandidate
+        break
+    } catch {
+        continue
+    }
+}
+if (-not $NpmCachePath) {
+    Stop-Setup "无法创建可写的 npm 缓存目录。请确认当前 Windows 用户可写入项目目录和 LocalAppData。"
+}
+
 if (-not $UseExistingVenv) {
     & $PythonExecutable @PythonPrefixArguments -m venv $VenvPath
     if ($LASTEXITCODE -ne 0) {
@@ -163,9 +182,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 Push-Location (Join-Path $WorkspacePath "frontend")
 try {
-    & $NpmCommand.Source ci
+    # Override any inaccessible machine/user cache setting (for example a
+    # stale D:\node_cache) without modifying the user's global npm config.
+    & $NpmCommand.Source ci --cache $NpmCachePath
     if ($LASTEXITCODE -ne 0) {
-        Stop-Setup "安装前端依赖失败，请检查网络连接后重试。"
+        Stop-Setup @"
+安装前端依赖失败。
+本次使用的 npm 缓存目录：$NpmCachePath
+请先关闭其他 Node.js/npm 进程并重试；如果仍出现 EPERM，请检查安全软件是否拦截该目录。
+"@
     }
 } finally {
     Pop-Location
