@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 $WorkspacePath = Split-Path -Parent $PSScriptRoot
 $StatePath = Join-Path $WorkspacePath "data\runtime.json"
 

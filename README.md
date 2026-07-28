@@ -104,13 +104,15 @@ flowchart LR
 ```powershell
 git clone https://github.com/fyfsxkh/TokBrain.git
 cd TokBrain
-.\scripts\setup.ps1
-.\start.ps1
+.\setup.cmd
+.\start.cmd
 ```
 
 如果使用 GitHub 的 **Download ZIP**，解压后在项目目录打开 PowerShell，执行最后两条
-命令即可。安装完成后，日常可直接双击：
+命令即可；零基础用户也可以直接双击 `安装.cmd`，无需永久修改 PowerShell 执行策略。
+安装完成后，日常可直接双击：
 
+- `安装.cmd`：首次安装或更新依赖
 - `启动.cmd`
 - `停止.cmd`
 - `重启.cmd`
@@ -132,6 +134,9 @@ cd TokBrain
 
 <details>
 <summary><strong>手动安装依赖</strong></summary>
+
+以下方式适合需要查看逐条安装命令的用户；Windows PowerShell 5.1 也能正确读取已带
+UTF-8 BOM 的项目脚本。
 
 ```powershell
 py -3.12 -m venv .venv

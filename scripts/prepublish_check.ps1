@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$GitExecutable = "git",
     [switch]$Full
 )
@@ -33,6 +33,8 @@ $requiredFiles = @(
     "CONTRIBUTING.md",
     "README.md",
     "README.en.md",
+    "setup.cmd",
+    "安装.cmd",
     "docs/screenshots/import-workspace.png",
     "docs/screenshots/knowledge-library.png",
     "docs/screenshots/grounded-chat.png",

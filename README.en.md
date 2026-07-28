@@ -114,13 +114,16 @@ is narrowed.
 ```powershell
 git clone https://github.com/fyfsxkh/TokBrain.git
 cd TokBrain
-.\scripts\setup.ps1
-.\start.ps1
+.\setup.cmd
+.\start.cmd
 ```
 
 If you use GitHub's **Download ZIP**, extract it, open PowerShell in the project
-directory, and run the last two commands. After setup, you can use:
+directory, and run the last two commands. A first-time user can also
+double-click `setup.cmd`; it applies an execution-policy override only to that
+installer process. After setup, you can use:
 
+- `setup.cmd` to install or update dependencies
 - `启动.cmd` to start
 - `停止.cmd` to stop
 - `重启.cmd` to restart
@@ -144,6 +147,9 @@ backup, and recovery details.
 
 <details>
 <summary><strong>Manual dependency installation</strong></summary>
+
+The project PowerShell scripts include a UTF-8 BOM for compatibility with
+Windows PowerShell 5.1.
 
 ```powershell
 py -3.12 -m venv .venv
