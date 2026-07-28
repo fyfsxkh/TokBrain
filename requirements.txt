@@ -11,7 +11,7 @@ loguru==0.7.2
 python-multipart==0.0.32
 
 # Media and AI providers
-openai==1.59.7
+openai==2.49.0
 dashscope==1.20.0
 Pillow==12.3.0
 tzdata==2025.2
