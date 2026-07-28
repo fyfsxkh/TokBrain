@@ -1,0 +1,26 @@
+:root[data-theme="aurora-snowfield"] {
+  --bg:#071426;
+  --panel:#0a2340;
+  --panel-2:#0d2d4d;
+  --line:rgba(174,235,255,.33);
+  --text:#f3fbff;
+  --muted:#a9c8d8;
+  --cyan:#61e9e2;
+  --pink:#8f62ff;
+  --amber:#38f29a;
+  --danger:#ff767d;
+  --theme-bg-image:url("/themes/aurora-snowfield.webp");
+  --theme-bg-opacity:.73;
+  --theme-overlay:linear-gradient(rgba(3,16,34,.56),rgba(3,18,36,.79));
+  --sidebar-bg:rgba(3,18,38,.88);
+  --card-bg:rgba(5,30,55,.74);
+  --input-bg:rgba(3,20,38,.8);
+  --panel-border:rgba(174,235,255,.38);
+  --panel-shadow:0 16px 44px rgba(0,7,25,.3);
+  --radius:11px;
+}
+:root[data-theme="aurora-snowfield"] .process-stages::before,
+:root[data-theme="aurora-snowfield"] .bar i,
+:root[data-theme="aurora-snowfield"] .progress-track i {
+  background:linear-gradient(90deg,#61e9e2,#38f29a,#8f62ff);
+}

@@ -1,0 +1,32 @@
+:root[data-theme="ocean-dawn"] {
+  --bg:#041b36;
+  --panel:#0a3852;
+  --panel-2:#0e4964;
+  --line:rgba(163,228,235,.38);
+  --text:#f4fbff;
+  --muted:#afd0db;
+  --cyan:#28d8d1;
+  --pink:#7cb8d8;
+  --amber:#f0c67d;
+  --danger:#ff7a6b;
+  --theme-bg-image:url("/themes/ocean-dawn.webp");
+  --theme-bg-opacity:.78;
+  --theme-overlay:linear-gradient(90deg,rgba(2,20,42,.86),rgba(2,27,48,.48),rgba(2,28,49,.62));
+  --sidebar-bg:rgba(3,28,53,.86);
+  --card-bg:rgba(5,48,73,.68);
+  --input-bg:rgba(2,30,49,.72);
+  --panel-border:rgba(181,237,241,.42);
+  --panel-shadow:0 18px 46px rgba(1,16,34,.26);
+  --radius:16px;
+}
+:root[data-theme="ocean-dawn"] .process-map::after {
+  content:"";
+  position:absolute;
+  right:-8%;
+  bottom:-30px;
+  left:-8%;
+  height:60px;
+  border-radius:50%;
+  border-top:2px solid rgba(40,216,209,.6);
+  filter:drop-shadow(0 0 10px rgba(40,216,209,.45));
+}

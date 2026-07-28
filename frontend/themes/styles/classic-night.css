@@ -1,0 +1,15 @@
+:root[data-theme="classic-night"] {
+  --bg:#0d1013;
+  --panel:#15191d;
+  --panel-2:#1b2025;
+  --line:#2a3036;
+  --text:#f4f1ea;
+  --muted:#9ba3aa;
+  --cyan:#36f0e0;
+  --pink:#ff315f;
+  --amber:#ffbd59;
+  --danger:#ff665f;
+  --theme-overlay:radial-gradient(circle at 80% -10%,rgba(54,240,224,.09),transparent 35%),radial-gradient(circle at 25% 110%,rgba(255,49,95,.08),transparent 36%),rgba(13,16,19,.92);
+  --sidebar-bg:rgba(12,15,18,.9);
+  --card-bg:rgba(21,25,29,.94);
+}

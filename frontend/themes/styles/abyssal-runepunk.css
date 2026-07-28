@@ -1,0 +1,25 @@
+:root[data-theme="abyssal-runepunk"] {
+  --bg:#031219;
+  --panel:#071c23;
+  --panel-2:#0a2931;
+  --line:#24505a;
+  --text:#e8f3ef;
+  --muted:#87aeb2;
+  --cyan:#35f2e6;
+  --pink:#8a5cff;
+  --amber:#d7cdb7;
+  --danger:#ff765b;
+  --theme-bg-image:url("/themes/abyssal-runepunk.webp");
+  --theme-bg-opacity:.68;
+  --theme-overlay:linear-gradient(rgba(1,12,18,.7),rgba(1,12,18,.86));
+  --sidebar-bg:rgba(1,14,20,.88);
+  --card-bg:rgba(3,25,32,.86);
+  --input-bg:rgba(2,16,22,.86);
+  --panel-border:rgba(53,242,230,.25);
+  --radius:10px;
+}
+:root[data-theme="abyssal-runepunk"] .process-stages::before,
+:root[data-theme="abyssal-runepunk"] .bar i,
+:root[data-theme="abyssal-runepunk"] .progress-track i {
+  background:linear-gradient(90deg,#35f2e6,#8a5cff,#35f2e6);
+}

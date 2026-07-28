@@ -1,0 +1,29 @@
+:root[data-theme="paper-organizer"] {
+  --bg:#f8f6f0;
+  --panel:#fffefa;
+  --panel-2:#f1eee6;
+  --line:#e0dbcf;
+  --text:#292929;
+  --muted:#716f6b;
+  --cyan:#648d7c;
+  --pink:#cc7f78;
+  --amber:#d4a373;
+  --danger:#ba5952;
+  --on-accent:#fff;
+  --theme-bg-image:url("/themes/paper-organizer.webp");
+  --theme-bg-opacity:.78;
+  --theme-overlay:rgba(248,246,240,.34);
+  --sidebar-bg:rgba(250,248,242,.9);
+  --card-bg:rgba(255,254,250,.86);
+  --input-bg:rgba(255,255,255,.82);
+  --panel-border:#e2ddd2;
+  --panel-shadow:0 8px 24px rgba(87,75,57,.09);
+  --radius:14px;
+  --radius-small:10px;
+  --heading-font:"PingFang SC","Microsoft YaHei",sans-serif;
+}
+:root[data-theme="paper-organizer"] .process-stages::before {
+  height:1px;
+  background:repeating-linear-gradient(90deg,#9cb4a8 0 8px,transparent 8px 15px);
+  box-shadow:none;
+}

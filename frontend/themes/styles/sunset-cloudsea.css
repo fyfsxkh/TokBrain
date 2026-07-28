@@ -1,0 +1,26 @@
+:root[data-theme="sunset-cloudsea"] {
+  --bg:#171a3d;
+  --panel:#2b203d;
+  --panel-2:#3a2848;
+  --line:rgba(255,179,107,.34);
+  --text:#fff0df;
+  --muted:#d0b8c8;
+  --cyan:#ffb36b;
+  --pink:#ff6f9d;
+  --amber:#ffd18f;
+  --danger:#ff6f61;
+  --theme-bg-image:url("/themes/sunset-cloudsea.webp");
+  --theme-bg-opacity:.78;
+  --theme-overlay:linear-gradient(90deg,rgba(21,20,54,.86),rgba(39,24,55,.54),rgba(38,25,51,.62));
+  --sidebar-bg:rgba(22,18,48,.88);
+  --card-bg:rgba(37,27,54,.72);
+  --input-bg:rgba(25,20,43,.78);
+  --panel-border:rgba(255,179,107,.42);
+  --panel-shadow:0 18px 46px rgba(25,12,44,.24);
+  --radius:14px;
+}
+:root[data-theme="sunset-cloudsea"] .process-stages::before,
+:root[data-theme="sunset-cloudsea"] .bar i,
+:root[data-theme="sunset-cloudsea"] .progress-track i {
+  background:linear-gradient(90deg,#ffb36b,#ff6f61,#d95bd8);
+}
