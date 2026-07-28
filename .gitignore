@@ -1,0 +1,77 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+.pypirc
+.netrc
+pip.ini
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+cookies.txt
+cookies.json
+session.json
+credentials.json
+
+# Python environments and caches
+.venv/
+.venv-*/
+.vendor/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.test-tmp/
+
+# Runtime data: may contain private media, metadata and encrypted secrets
+data/
+logs/
+backups/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.bak
+*.sql
+exports/
+media/
+keyframes/
+source-assets/
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.m4a
+*.wav
+*.srt
+*.vtt
+*.ass
+
+# Local agent/editor state
+.agents/
+.codex/
+.idea/
+.vscode/
+
+# Frontend build and dependencies
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Research archives and operating-system files
+upstream-main.zip
+f2-research.zip
+_upstream/
+_f2_research/
+*.zip
+*.log
+.DS_Store
+Thumbs.db

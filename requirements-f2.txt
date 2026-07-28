@@ -1,0 +1,5 @@
+# F2 is intentionally installed with `pip install --no-deps --target .vendor`.
+# Do not install this file without --no-deps: F2 0.0.1.7 declares obsolete
+# exact dependency pins and unnecessary development tools. Compatible audited
+# runtime dependencies are maintained separately in requirements.txt.
+f2==0.0.1.7

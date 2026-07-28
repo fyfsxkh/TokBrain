@@ -1,0 +1,26 @@
+:root[data-theme="moss-forest"] {
+  --bg:#071d18;
+  --panel:#103127;
+  --panel-2:#153f31;
+  --line:rgba(137,174,102,.35);
+  --text:#f3e9ce;
+  --muted:#b4c4a5;
+  --cyan:#62d8c7;
+  --pink:#9bbf63;
+  --amber:#f0c87a;
+  --danger:#e9796f;
+  --theme-bg-image:url("/themes/moss-forest.webp");
+  --theme-bg-opacity:.73;
+  --theme-overlay:linear-gradient(90deg,rgba(2,24,19,.9),rgba(5,31,23,.55),rgba(7,36,26,.66));
+  --sidebar-bg:rgba(2,29,23,.9);
+  --card-bg:rgba(8,48,36,.76);
+  --input-bg:rgba(4,31,24,.8);
+  --panel-border:rgba(155,191,99,.34);
+  --panel-shadow:0 18px 44px rgba(0,15,9,.3);
+  --radius:18px;
+}
+:root[data-theme="moss-forest"] .process-stages::before,
+:root[data-theme="moss-forest"] .bar i,
+:root[data-theme="moss-forest"] .progress-track i {
+  background:linear-gradient(90deg,#9bbf63,#62d8c7,#f0c87a);
+}

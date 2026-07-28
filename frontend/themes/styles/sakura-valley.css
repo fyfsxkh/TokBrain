@@ -1,0 +1,38 @@
+:root[data-theme="sakura-valley"] {
+  --bg:#ede8ee;
+  --panel:#fff9f7;
+  --panel-2:#ebeaf3;
+  --line:rgba(49,53,82,.22);
+  --text:#24324c;
+  --muted:#66728a;
+  --cyan:#e985a4;
+  --pink:#f3b6c6;
+  --amber:#f2a985;
+  --danger:#ce5d73;
+  --on-accent:#fff;
+  --theme-bg-image:url("/themes/sakura-valley.webp");
+  --theme-bg-opacity:.74;
+  --theme-overlay:linear-gradient(90deg,rgba(38,43,70,.76),rgba(242,235,239,.38) 23%,rgba(244,237,241,.35));
+  --sidebar-bg:rgba(35,41,70,.88);
+  --card-bg:rgba(255,249,247,.76);
+  --input-bg:rgba(255,252,250,.79);
+  --panel-border:rgba(255,255,255,.62);
+  --panel-shadow:0 16px 38px rgba(73,66,90,.14);
+  --radius:18px;
+  --heading-font:"STSong","SimSun","Noto Serif CJK SC",serif;
+}
+:root[data-theme="sakura-valley"] .sidebar,
+:root[data-theme="sakura-valley"] .sidebar .brand strong,
+:root[data-theme="sakura-valley"] .sidebar nav button {
+  color:#fff4f6;
+}
+:root[data-theme="sakura-valley"] .sidebar nav button:not(.active) {
+  color:#d7d8e4;
+}
+:root[data-theme="sakura-valley"] .sidebar nav button.active,
+:root[data-theme="sakura-valley"] .sidebar nav button:hover {
+  border-color:rgba(255,187,207,.62);
+  background:rgba(105,55,82,.82);
+  color:#fff;
+  box-shadow:0 10px 24px rgba(16,20,43,.2);
+}

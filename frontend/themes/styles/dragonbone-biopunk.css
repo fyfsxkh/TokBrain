@@ -1,0 +1,27 @@
+:root[data-theme="dragonbone-biopunk"] {
+  --bg:#0c0d0f;
+  --panel:#151313;
+  --panel-2:#201818;
+  --line:#4b3b32;
+  --text:#e8dfcf;
+  --muted:#a99b8b;
+  --cyan:#ff5b55;
+  --pink:#ff315a;
+  --amber:#ffb347;
+  --danger:#ff4a52;
+  --theme-bg-image:url("/themes/dragonbone-biopunk.webp");
+  --theme-bg-opacity:.62;
+  --theme-overlay:linear-gradient(90deg,rgba(9,10,11,.88),rgba(9,10,11,.67) 56%,rgba(9,10,11,.82));
+  --sidebar-bg:rgba(8,9,10,.9);
+  --card-bg:linear-gradient(145deg,rgba(18,18,18,.91),rgba(10,11,12,.9));
+  --input-bg:rgba(8,9,10,.82);
+  --panel-border:#5b4637;
+  --radius:3px;
+  --radius-small:2px;
+  --heading-font:"STSong","SimSun","Noto Serif CJK SC",serif;
+}
+:root[data-theme="dragonbone-biopunk"] .process-map,
+:root[data-theme="dragonbone-biopunk"] .card,
+:root[data-theme="dragonbone-biopunk"] .metric {
+  box-shadow:inset 0 0 0 1px rgba(216,203,183,.06),0 18px 54px rgba(0,0,0,.38);
+}

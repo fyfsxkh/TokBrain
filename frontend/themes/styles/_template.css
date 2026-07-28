@@ -1,0 +1,31 @@
+/*
+ * Copy this file to <theme-id>.css, then import it directly from app/layout.tsx.
+ * Every selector must remain scoped to the theme ID.
+ */
+:root[data-theme="replace-with-theme-id"] {
+  --bg:#101214;
+  --panel:#171a1e;
+  --panel-2:#20242a;
+  --line:#343a42;
+  --text:#f4f4f2;
+  --muted:#a7adb5;
+  --cyan:#57d8ce;
+  --pink:#e36f91;
+  --amber:#e0b865;
+  --danger:#ef6963;
+  --on-accent:#101214;
+
+  --theme-bg-image:none;
+  --theme-bg-position:center;
+  --theme-bg-opacity:0;
+  --theme-overlay:rgba(16,18,20,.9);
+  --sidebar-bg:rgba(13,15,18,.9);
+  --card-bg:rgba(23,26,30,.9);
+  --input-bg:rgba(13,15,18,.82);
+  --panel-border:var(--line);
+  --panel-shadow:0 16px 42px rgba(0,0,0,.18);
+  --radius:12px;
+  --radius-small:8px;
+  --heading-font:Inter,"PingFang SC","Microsoft YaHei",sans-serif;
+  --body-font:Inter,"PingFang SC","Microsoft YaHei",sans-serif;
+}

@@ -1,0 +1,42 @@
+:root[data-theme="aether-sky-city"] {
+  --bg:#edf3f7;
+  --panel:#fffdf8;
+  --panel-2:#edf8fd;
+  --line:#d8c9ae;
+  --text:#12233c;
+  --muted:#64778b;
+  --cyan:#1daedb;
+  --pink:#ef7b67;
+  --amber:#b99146;
+  --danger:#c74c42;
+  --on-accent:#fff;
+  --theme-bg-image:url("/themes/aether-sky-city.webp");
+  --theme-bg-opacity:.74;
+  --theme-overlay:linear-gradient(90deg,rgba(244,248,250,.76),rgba(244,248,250,.45),rgba(244,248,250,.7));
+  --sidebar-bg:rgba(255,252,245,.84);
+  --card-bg:rgba(255,253,248,.78);
+  --input-bg:rgba(255,255,255,.76);
+  --panel-border:rgba(185,145,70,.38);
+  --panel-shadow:0 14px 36px rgba(50,88,112,.13);
+  --radius:16px;
+  --radius-small:12px;
+  --heading-font:"STSong","SimSun","Noto Serif CJK SC",serif;
+}
+:root[data-theme="aether-sky-city"] .process-map,
+:root[data-theme="aether-sky-city"] .card {
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.72),0 15px 35px rgba(44,102,133,.12);
+}
+:root[data-theme="aether-sky-city"] .segmented button.active {
+  background:#176a94;
+  color:#fff;
+  box-shadow:0 5px 16px rgba(23,106,148,.2);
+}
+:root[data-theme="aether-sky-city"] .work-check {
+  border-color:rgba(122,91,40,.42);
+  background:rgba(255,253,247,.94);
+  color:#173552;
+  box-shadow:0 5px 16px rgba(38,65,84,.18);
+}
+:root[data-theme="aether-sky-city"] .work-check span {
+  color:#173552;
+}

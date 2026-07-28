@@ -1,0 +1,25 @@
+:root[data-theme="desert-observatory"] {
+  --bg:#10142c;
+  --panel:#181c34;
+  --panel-2:#22243d;
+  --line:rgba(216,166,87,.38);
+  --text:#efe2c4;
+  --muted:#b9ad9e;
+  --cyan:#d8a657;
+  --pink:#7658d8;
+  --amber:#efc985;
+  --danger:#e97161;
+  --theme-bg-image:url("/themes/desert-observatory.webp");
+  --theme-bg-opacity:.72;
+  --theme-overlay:linear-gradient(90deg,rgba(9,13,33,.9),rgba(10,15,35,.57),rgba(10,14,30,.66));
+  --sidebar-bg:rgba(8,12,31,.9);
+  --card-bg:rgba(15,19,39,.79);
+  --input-bg:rgba(9,13,30,.84);
+  --panel-border:rgba(216,166,87,.38);
+  --panel-shadow:0 18px 46px rgba(3,5,18,.32);
+  --radius:8px;
+  --heading-font:"STSong","SimSun","Noto Serif CJK SC",serif;
+}
+:root[data-theme="desert-observatory"] .process-map {
+  background-image:radial-gradient(circle at 50% 0,rgba(216,166,87,.08),transparent 50%);
+}

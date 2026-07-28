@@ -1,0 +1,29 @@
+:root[data-theme="volcanic-forge"] {
+  --bg:#0c0e12;
+  --panel:#171a1e;
+  --panel-2:#20252b;
+  --line:#3d434a;
+  --text:#f2f2ef;
+  --muted:#a8adb3;
+  --cyan:#ff6a1a;
+  --pink:#e23d2d;
+  --amber:#ffc14d;
+  --danger:#ff4938;
+  --theme-bg-image:url("/themes/volcanic-forge.webp");
+  --theme-bg-opacity:.67;
+  --theme-overlay:linear-gradient(90deg,rgba(8,10,13,.91),rgba(9,11,14,.68),rgba(8,10,12,.73));
+  --sidebar-bg:rgba(8,10,13,.92);
+  --card-bg:linear-gradient(145deg,rgba(24,27,31,.91),rgba(12,14,17,.88));
+  --input-bg:rgba(8,10,13,.84);
+  --panel-border:#45494e;
+  --panel-shadow:0 18px 46px rgba(0,0,0,.35);
+  --radius:3px;
+  --radius-small:2px;
+  --heading-font:"Arial Narrow","Microsoft YaHei",sans-serif;
+}
+:root[data-theme="volcanic-forge"] .process-stages::before,
+:root[data-theme="volcanic-forge"] .bar i,
+:root[data-theme="volcanic-forge"] .progress-track i {
+  background:linear-gradient(90deg,#ff6a1a,#ffc14d,#425b73);
+  box-shadow:0 0 16px rgba(255,106,26,.48);
+}

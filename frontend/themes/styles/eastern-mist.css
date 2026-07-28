@@ -1,0 +1,29 @@
+:root[data-theme="eastern-mist"] {
+  --bg:#f5f1e7;
+  --panel:#fbf9f2;
+  --panel-2:#edf1eb;
+  --line:#d8d4c8;
+  --text:#1f2925;
+  --muted:#68736d;
+  --cyan:#426b5a;
+  --pink:#a65b50;
+  --amber:#8ba887;
+  --danger:#a74d45;
+  --on-accent:#fff;
+  --theme-bg-image:url("/themes/eastern-mist.webp");
+  --theme-bg-opacity:.84;
+  --theme-overlay:rgba(247,244,236,.32);
+  --sidebar-bg:rgba(243,244,237,.9);
+  --card-bg:rgba(251,249,242,.8);
+  --input-bg:rgba(255,254,249,.78);
+  --panel-border:rgba(66,107,90,.22);
+  --panel-shadow:0 10px 30px rgba(50,64,57,.08);
+  --radius:12px;
+  --heading-font:"STSong","SimSun","Noto Serif CJK SC",serif;
+  --body-font:"Songti SC","STSong","SimSun",serif;
+}
+:root[data-theme="eastern-mist"] .process-map,
+:root[data-theme="eastern-mist"] .metric,
+:root[data-theme="eastern-mist"] .card {
+  backdrop-filter:blur(8px);
+}
