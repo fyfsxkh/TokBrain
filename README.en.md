@@ -109,6 +109,12 @@ is narrowed.
 | FFmpeg / ffprobe | Required for full-video processing and local-video validation; must be on `PATH` |
 | Alibaba Cloud Model Studio API key | Required for OCR, ASR, summaries, embeddings, and chat; not required for basic preview |
 
+`setup.cmd` installs project dependencies; it does not install system software
+such as Python or Node.js. Before the first run, install **64-bit Python 3.12**
+and **Node.js 22 or later**. Select `Add python.exe to PATH` in the Python
+installer. If a prerequisite is missing or incompatible, the setup window now
+shows the relevant download address and instructions.
+
 ### Download and run
 
 ```powershell

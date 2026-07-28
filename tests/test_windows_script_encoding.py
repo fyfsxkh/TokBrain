@@ -22,3 +22,19 @@ def test_setup_launcher_uses_process_scoped_execution_policy_bypass():
     assert "-executionpolicy bypass" in launcher
     assert r"scripts\setup.ps1" in launcher
     assert 'call "%~dp0setup.cmd"' in localized_launcher
+
+
+def test_setup_handles_missing_python_runtime_as_a_probe_failure():
+    setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+    assert "function Test-NativeCommand" in setup
+    assert '$ErrorActionPreference = "Continue"' in setup
+    assert "No suitable Python runtime found" not in setup
+    assert "Python.Python.3.12" in setup
+    assert "完成上述操作后，请再次双击 安装.cmd" in setup
+
+
+def test_setup_checks_node_before_installing_project_dependencies():
+    setup = (ROOT / "scripts" / "setup.ps1").read_text(encoding="utf-8")
+    node_check = setup.index("$NodeCommand = Get-Command node")
+    pip_install = setup.index("-m pip install --upgrade pip")
+    assert node_check < pip_install

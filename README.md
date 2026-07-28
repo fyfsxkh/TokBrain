@@ -99,6 +99,11 @@ flowchart LR
 | FFmpeg / ffprobe | 完整视频处理和本地视频校验需要，并应加入 `PATH` |
 | 阿里云百炼 API Key | OCR、ASR、总结、向量化和问答需要；仅做基础预检时可暂不配置 |
 
+`安装.cmd` 负责安装项目依赖，不会代替用户安装 Python、Node.js 等系统软件。首次
+使用前请先安装 **64 位 Python 3.12** 和 **Node.js 22 或更高版本**；安装 Python
+时请勾选 `Add python.exe to PATH`。如果缺少或版本不符合，安装窗口会给出对应下载
+地址和处理方法，不会再显示难以理解的 PowerShell 异常。
+
 ### 下载并启动
 
 ```powershell
