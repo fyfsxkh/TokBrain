@@ -22,7 +22,7 @@
     "mdast-util-to-string": "^4.0.0",
     "next": "^16.2.12",
     "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "react-dom": "19.2.8",
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
