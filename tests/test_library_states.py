@@ -1,17 +1,22 @@
-from sqlalchemy import select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.routers_v2.library as library_routes
 from app.models import (
     Base,
     Collection,
     CollectionMembership,
+    Keyframe,
     KnowledgeChunk,
     Work,
+    WorkSourceAsset,
+    WorkSummary,
 )
 from app.routers_v2.library import (
     add_works_to_collection,
     collections,
     create_collection,
+    permanently_delete_work,
     retry_work,
     works,
 )
@@ -20,6 +25,13 @@ from app.schemas import CollectionAssignment, CollectionCreate
 
 async def make_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def enable_foreign_keys(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -114,6 +126,133 @@ async def test_pending_or_issue_work_can_create_ingest_job():
     assert response["job"]["state"] == "queued"
     refreshed = (await session.execute(select(Work))).scalar_one()
     assert refreshed.library_state == "pending"
+    await session.close()
+    await engine.dispose()
+
+
+async def test_permanent_delete_removes_completed_knowledge_and_local_assets(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(library_routes, "DATA_DIR", tmp_path)
+    source_root = tmp_path / "source-assets"
+    media_root = tmp_path / "media" / "delete-completed"
+    keyframe_root = tmp_path / "keyframes" / "delete-completed"
+    source_root.mkdir(parents=True)
+    media_root.mkdir(parents=True)
+    keyframe_root.mkdir(parents=True)
+    source_path = source_root / "uploaded.mp4"
+    source_path.write_bytes(b"local source")
+    (media_root / "image.jpg").write_bytes(b"derived image")
+    keyframe_path = keyframe_root / "frame.jpg"
+    keyframe_path.write_bytes(b"keyframe")
+
+    engine, session = await make_session()
+    work = Work(
+        platform_work_id="delete-completed",
+        title="已完成总结作品",
+        library_state="in_library",
+        processing_state="processed",
+    )
+    session.add(work)
+    await session.flush()
+    session.add_all(
+        [
+            WorkSummary(
+                work_id=work.id,
+                one_sentence="待删除总结",
+                content_json={"outline": ["待删除"]},
+                tags=["测试"],
+                asset_ids=["frame.jpg"],
+            ),
+            KnowledgeChunk(
+                work_id=work.id,
+                chunk_index=0,
+                source_kind="summary",
+                text="待删除索引内容",
+                embedding=[0.1, 0.2],
+            ),
+            Keyframe(
+                work_id=work.id,
+                timestamp_seconds=1.0,
+                path=str(keyframe_path),
+            ),
+            WorkSourceAsset(
+                work_id=work.id,
+                kind="video",
+                path=str(source_path),
+                mime_type="video/mp4",
+                size_bytes=source_path.stat().st_size,
+                sha256="a" * 64,
+            ),
+        ]
+    )
+    await session.commit()
+    work_id = work.id
+
+    response = await permanently_delete_work(work_id, session=session)
+
+    assert response == {
+        "deleted": True,
+        "id": work_id,
+        "assets_deleted": True,
+    }
+    assert await session.get(Work, work_id) is None
+    for model in (WorkSummary, KnowledgeChunk, Keyframe, WorkSourceAsset):
+        assert await session.scalar(select(func.count()).select_from(model)) == 0
+    assert not source_path.exists()
+    assert not media_root.exists()
+    assert not keyframe_root.exists()
+    await session.close()
+    await engine.dispose()
+
+
+async def test_permanent_delete_stays_successful_when_source_asset_is_locked(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(library_routes, "DATA_DIR", tmp_path)
+    source_root = tmp_path / "source-assets"
+    source_root.mkdir(parents=True)
+    source_path = source_root / "locked.mp4"
+    source_path.write_bytes(b"locked source")
+
+    engine, session = await make_session()
+    work = Work(
+        platform_work_id="delete-locked",
+        title="本地文件被占用",
+        library_state="in_library",
+        processing_state="processed",
+    )
+    session.add(work)
+    await session.flush()
+    session.add(
+        WorkSourceAsset(
+            work_id=work.id,
+            kind="video",
+            path=str(source_path),
+            mime_type="video/mp4",
+            size_bytes=source_path.stat().st_size,
+            sha256="b" * 64,
+        )
+    )
+    await session.commit()
+    work_id = work.id
+    original_unlink = type(source_path).unlink
+
+    def locked_unlink(path, *args, **kwargs):
+        if path == source_path:
+            raise PermissionError("file is in use")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(source_path), "unlink", locked_unlink)
+    response = await permanently_delete_work(work_id, session=session)
+
+    assert response == {
+        "deleted": True,
+        "id": work_id,
+        "assets_deleted": False,
+    }
+    assert await session.get(Work, work_id) is None
+    assert source_path.exists()
     await session.close()
     await engine.dispose()
 

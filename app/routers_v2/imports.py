@@ -9,8 +9,8 @@ from app.services.import_queue import (
     confirm_import_items,
     coordinator,
     create_import_batch,
+    delete_import_item,
 )
-from app.services.jobs import job_to_dict
 from app.services.local_assets import LocalAssetError, store_local_assets
 from app.services.f2_links import PublicLinkError
 
@@ -36,12 +36,15 @@ async def create_batch(
         raise HTTPException(
             status_code=code, detail={"code": exc.code, "message": str(exc)}
         ) from exc
+    created_view = await batch_view(session, batch.id)
     await coordinator.enqueue(item_ids)
     return {
         "batch_id": batch.id,
         "job_id": batch.job_id,
         "accepted_count": batch.total_items,
         "rejected_count": rejected_count,
+        "queued_count": len(item_ids),
+        "duplicate_count": int(created_view["progress"].get("duplicates", 0)),
     }
 
 
@@ -68,9 +71,19 @@ async def confirm_batch(
     payload: ImportConfirm,
     session: AsyncSession = Depends(get_db),
 ):
+    assignments = {item.item_id: item.collection_id for item in payload.items}
+    item_ids = list(dict.fromkeys([*payload.item_ids, *assignments]))
+    if not item_ids:
+        raise HTTPException(status_code=422, detail="请选择至少一个待确认作品")
+    if len(item_ids) > 10:
+        raise HTTPException(status_code=422, detail="每批最多确认 10 个作品")
     try:
-        job = await confirm_import_items(session, batch_id, payload.item_ids)
-        return job_to_dict(job)
+        return await confirm_import_items(
+            session,
+            batch_id,
+            item_ids,
+            collection_ids=assignments,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -95,3 +108,16 @@ async def upload_assets(
         raise HTTPException(
             status_code=422, detail={"code": exc.code, "message": str(exc)}
         ) from exc
+
+
+@router.delete("/import-items/{item_id}")
+async def delete_preview_item(
+    item_id: int, session: AsyncSession = Depends(get_db)
+):
+    try:
+        batch_id = await delete_import_item(session, item_id)
+        return await batch_view(session, batch_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

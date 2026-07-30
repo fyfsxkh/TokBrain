@@ -86,8 +86,19 @@ test("batch input, progress, three workers, cancellation, and confirmation are v
   assert.match(page, /className="worker-grid"/);
   assert.match(page, /中断解析/);
   assert.match(page, /正在安全停止/);
-  assert.match(page, /确认并入库/);
-  assert.match(page, /允许下载的作品走完整流程；其他作品只处理字幕、音频或基础信息/);
+  assert.match(page, /确认加入待入库/);
+  assert.match(page, /confirmedWorkIds/);
+  assert.match(page, /confirmedIds\.push\(\.\.\.result\.work_ids\)/);
+  assert.match(page, /api\.ingest\(workIds\)/);
+  assert.match(page, /入库（\$\{confirmedWorkIds\.length\}）/);
+  assert.match(page, /已勾选待确认/);
+  assert.match(page, /已确认待入库/);
+  assert.match(page, /新勾选作品需先确认；已确认作品可直接入库，两组操作互不影响/);
+  assert.match(page, /samePreviewWork/);
+  assert.match(page, /selectedVisibleIds/);
+  assert.match(page, /确认加入待入库（\$\{selectedVisibleIds\.length\}）/);
+  assert.match(page, /加入收藏夹/);
+  assert.match(page, /manual-import/);
 });
 
 test("batch polling is bounded and stops at terminal states", () => {
@@ -104,12 +115,34 @@ test("starting a new preview retains prior confirmable results and clears only s
   assert.match(page, /submittedImportTexts/);
   assert.match(page, /fullySuccessful/);
   assert.match(page, /setImportText\(\(current\) => current\.trim\(\) === submitted\.trim\(\) \? "" : current\)/);
+  assert.doesNotMatch(
+    page,
+    /if \(tab === "import"\) return;\s*setRetainedBatches\(\[\]\)/,
+  );
+});
+
+test("duplicate links are removed automatically while unique works continue previewing", () => {
+  assert.match(api, /queued_count: number/);
+  assert.match(api, /duplicate_count: number/);
+  assert.match(page, /const duplicateOnly =/);
+  assert.match(page, /已去掉 \$\{created\.duplicate_count\} 条重复链接/);
+  assert.match(page, /没有新的作品需要预检/);
+  assert.match(page, /\$\{created\.queued_count\} 个不同作品已进入预检/);
+  assert.match(page, /Number\(next\.progress\.duplicates \|\| 0\)/);
+  assert.match(
+    page,
+    /!\(item\.status === "duplicate" && item\.error_code === "duplicate_input"\)/,
+  );
 });
 
 test("result rows expose stable errors, upload fallback, and long-text wrapping", () => {
   assert.match(page, /item\.error_code && <code>/);
   assert.match(page, /item\.error_message/);
+  assert.match(page, /item\.error_code === "duplicate_input" \? "预检重复" : "已在知识库"/);
   assert.match(page, /上传本地补件/);
+  assert.match(page, /删除预检结果/);
+  assert.match(page, /removePreviewItem/);
+  assert.match(api, /removeImportItem/);
   assert.match(page, /\.mp4,.mov,.mkv,.webm/);
   assert.match(styles, /\.result-body h3\s*\{[^}]*overflow-wrap:anywhere/s);
   assert.match(styles, /\.result-body p\s*\{[^}]*overflow-wrap:anywhere/s);
@@ -202,6 +235,14 @@ test("pending and in-library works can share local collections", () => {
   assert.match(page, /加入收藏夹/);
   assert.match(page, /state === "pending" \|\| state === "in_library"/);
   assert.match(page, /收藏夹关系会在作品完成 AI 处理后继续保留/);
+  assert.match(page, /批量开始入库/);
+  assert.match(page, /设置总结提示词/);
+  assert.match(page, /收藏夹专属 AI 规则/);
+  assert.match(page, /activeCollection\.summary_prompt \|\| globalSummaryPrompt/);
+  assert.match(page, /已作为可编辑正文载入/);
+  assert.doesNotMatch(page, /placeholder=\{globalSummaryPrompt/);
+  assert.match(api, /updateCollectionSummaryPrompt/);
+  assert.match(api, /\/api\/library\/ingest\/jobs/);
 });
 
 test("sidebar ambient scenes exist for non-classic themes", () => {
@@ -282,6 +323,7 @@ test("library keeps four states, summaries, lazy covers, and Obsidian export", a
   assert.match(page, /loading="lazy" decoding="async"/);
   assert.match(page, /value\?\.startsWith\("\/api\/"\) \? `\$\{API_BASE\}\$\{value\}` : null/);
   assert.match(page, /className="technical-details" aria-label="技术详情"/);
+  assert.match(page, /确认永久删除这个作品、总结、索引与本地资产/);
   assert.match(obsidian, /showDirectoryPicker/);
   assert.match(obsidian, /text\/markdown;charset=utf-8/);
   assert.match(obsidian, /chooseObsidianImageDirectory/);
@@ -318,4 +360,6 @@ test("production page and summary route compile around current navigation", asyn
   const summaryPage = await readFile(new URL("../app/works/[id]/page.tsx", import.meta.url), "utf8");
   assert.match(summaryPage, /\?tab=library&state=in_library&view=works/);
   assert.match(summaryPage, /summary-content/);
+  assert.match(summaryPage, /永久删除/);
+  assert.match(summaryPage, /api\.remove\(workId\)/);
 });

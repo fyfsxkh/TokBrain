@@ -88,14 +88,16 @@ function stateLabel(state: string) {
 }
 
 function itemStatus(item: ImportItem) {
+  if (item.status === "duplicate") {
+    return item.error_code === "duplicate_input" ? "预检重复" : "已在知识库";
+  }
   return (
     {
       queued: "排队中",
       resolving: `Worker ${item.worker_id || "?"} 解析中`,
       ready: "可以确认",
       needs_local_file: "需要本地补件",
-      duplicate: "已存在",
-      confirmed: "已确认入库",
+      confirmed: "已加入待入库",
       failed: "解析失败",
       blocked: "因风控停止",
       cancelled: "已中断",
@@ -108,6 +110,17 @@ function mediaPolicyLabel(item: ImportItem) {
   if (item.download_permission === "allowed") return "作者允许下载 · 完整视频处理";
   if (item.has_audio_or_subtitle) return "作者未允许下载 · 仅字幕/音频";
   return "作者未允许下载或状态未知 · 仅基础信息";
+}
+
+function samePreviewWork(left: ImportItem, right: ImportItem) {
+  if (
+    left.platform_work_id
+    && right.platform_work_id
+    && left.platform_work_id === right.platform_work_id
+  ) {
+    return true;
+  }
+  return left.normalized_url === right.normalized_url;
 }
 
 export default function Home() {
@@ -129,6 +142,8 @@ export default function Home() {
   const [batch, setBatch] = useState<ImportBatch | null>(null);
   const [retainedBatches, setRetainedBatches] = useState<ImportBatch[]>([]);
   const [selectedItems, setSelectedItems] = useState<Set<number>>(new Set());
+  const [itemCollections, setItemCollections] = useState<Map<number, number>>(new Map());
+  const [confirmedWorkIds, setConfirmedWorkIds] = useState<number[]>([]);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatMode, setChatMode] = useState<"fast" | "deep">("fast");
@@ -191,12 +206,6 @@ export default function Home() {
   }, [notice]);
 
   useEffect(() => {
-    if (tab === "import") return;
-    setRetainedBatches([]);
-    setSelectedItems(new Set());
-  }, [tab]);
-
-  useEffect(() => {
     if (tab === "library") loadLibrary(false).catch((value) => setError(reason(value)));
   }, [tab, libraryState, collectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -210,10 +219,14 @@ export default function Home() {
           const readyIds = next.items
             .filter((item) => item.status === "ready")
             .map((item) => item.id);
+          const duplicateCount = Number(next.progress.duplicates || 0);
+          const confirmableCount = next.items.filter((item) =>
+            RETAINED_IMPORT_STATUSES.has(item.status),
+          ).length;
           setSelectedItems((current) => new Set([...current, ...readyIds]));
           const submitted = submittedImportTexts.current.get(next.id);
           const fullySuccessful =
-            readyIds.length > 0
+            (readyIds.length > 0 || duplicateCount > 0)
             && !next.items.some((item) =>
               ["failed", "blocked", "cancelled", "needs_local_file"].includes(item.status),
             );
@@ -221,6 +234,13 @@ export default function Home() {
             setImportText((current) => current.trim() === submitted.trim() ? "" : current);
           }
           submittedImportTexts.current.delete(next.id);
+          if (duplicateCount > 0) {
+            setNotice(
+              confirmableCount > 0
+                ? `已去掉 ${duplicateCount} 条重复链接，${confirmableCount} 个不同作品预检完成`
+                : `已去掉 ${duplicateCount} 条重复链接，没有新的作品需要预检`,
+            );
+          }
           await loadCommon();
         }
       } catch (value) {
@@ -273,6 +293,20 @@ export default function Home() {
     try {
       const created = await api.createImportBatch(submittedText);
       const next = await api.importBatch(created.batch_id);
+      const duplicateOnly =
+        created.queued_count === 0
+        && created.duplicate_count > 0
+        && next.items.every(
+          (item) => item.status === "duplicate" && item.error_code === "duplicate_input",
+        );
+      if (duplicateOnly) {
+        setImportText((current) => current.trim() === submittedText.trim() ? "" : current);
+        setNotice(
+          `已去掉 ${created.duplicate_count} 条重复链接，没有新的作品需要预检`,
+        );
+        await loadCommon();
+        return;
+      }
       if (batch) {
         const retainedItems = batch.items.filter((item) =>
           RETAINED_IMPORT_STATUSES.has(item.status),
@@ -286,11 +320,17 @@ export default function Home() {
       }
       submittedImportTexts.current.set(next.id, submittedText);
       setBatch(next);
-      setNotice(
-        created.rejected_count
-          ? `已接收 ${created.accepted_count} 条，超出批量上限的 ${created.rejected_count} 条未入队`
-          : `已创建 ${created.accepted_count} 条链接的解析队列`,
-      );
+      const messages: string[] = [];
+      if (created.duplicate_count > 0) {
+        messages.push(`已去掉 ${created.duplicate_count} 条重复链接`);
+      }
+      if (created.queued_count > 0) {
+        messages.push(`${created.queued_count} 个不同作品已进入预检`);
+      }
+      if (created.rejected_count > 0) {
+        messages.push(`超出批量上限的 ${created.rejected_count} 条未入队`);
+      }
+      setNotice(messages.join("；") || "链接预检已完成，请查看结果");
     } catch (value) {
       setError(reason(value));
     } finally {
@@ -343,29 +383,99 @@ export default function Home() {
     }
   }
 
-  async function confirmBatch() {
-    if (!selectedItems.size) return;
+  async function removePreviewItem(item: ImportItem) {
+    if (!window.confirm("确认删除这条预检结果？已加入知识库的作品不会在这里被删除。")) return;
+    const owner = [batch, ...retainedBatches].find((candidate) =>
+      candidate?.items.some((entry) => entry.id === item.id),
+    );
+    if (!owner) return;
+    setBusy(`remove-preview-${item.id}`);
+    setError("");
+    try {
+      const next = await api.removeImportItem(item.id);
+      if (batch?.id === owner.id) {
+        setBatch(next.items.length ? next : null);
+      } else {
+        setRetainedBatches((current) =>
+          current.flatMap((entry) => {
+            if (entry.id !== owner.id) return [entry];
+            const retained = {
+              ...next,
+              items: next.items.filter((candidate) =>
+                RETAINED_IMPORT_STATUSES.has(candidate.status),
+              ),
+            };
+            return retained.items.length ? [retained] : [];
+          }),
+        );
+      }
+      setSelectedItems((current) => {
+        const updated = new Set(current);
+        updated.delete(item.id);
+        return updated;
+      });
+      setItemCollections((current) => {
+        const updated = new Map(current);
+        updated.delete(item.id);
+        return updated;
+      });
+      setNotice("预检结果已删除");
+    } catch (value) {
+      setError(reason(value, "删除预检结果失败"));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function confirmBatch(itemIds: number[]) {
+    if (!itemIds.length) return;
+    const requestedItems = new Set(itemIds);
     const candidates = [...retainedBatches, ...(batch ? [batch] : [])];
+    const manualCollectionId = collections.find((group) => group.key === "manual-import")?.id;
+    const uniqueItems: ImportItem[] = [];
     const groups = candidates
       .map((entry) => ({
         batch: entry,
-        itemIds: entry.items
-          .filter((item) => selectedItems.has(item.id) && RETAINED_IMPORT_STATUSES.has(item.status))
-          .map((item) => item.id),
+        items: entry.items
+          .filter((item) => {
+            if (
+              !requestedItems.has(item.id)
+              || !RETAINED_IMPORT_STATUSES.has(item.status)
+              || uniqueItems.some((candidate) => samePreviewWork(candidate, item))
+            ) {
+              return false;
+            }
+            uniqueItems.push(item);
+            return true;
+          })
+          .map((item) => ({
+            item_id: item.id,
+            collection_id: itemCollections.get(item.id) ?? manualCollectionId,
+          })),
       }))
-      .filter((entry) => entry.itemIds.length);
+      .filter((entry) => entry.items.length);
     if (!groups.length) return;
+    const confirmedIds: number[] = [];
     const accepted = await perform(
       "confirm",
       async () => {
         for (const group of groups) {
-          await api.confirmImportBatch(group.batch.id, group.itemIds);
+          const result = await api.confirmImportBatch(group.batch.id, group.items);
+          confirmedIds.push(...result.work_ids);
         }
       },
-      `已将 ${selectedItems.size} 个作品加入入库任务队列`,
+      "所选作品已加入待入库，可直接点击“入库”开始处理",
     );
     if (accepted) {
+      const uniqueConfirmedIds = [...new Set(confirmedIds)];
+      setNotice(
+        `已将 ${uniqueConfirmedIds.length} 个不同作品加入待入库，可直接点击“入库”开始处理`,
+      );
+      setConfirmedWorkIds((current) => [
+        ...new Set([...current, ...uniqueConfirmedIds]),
+      ]);
       setSelectedItems(new Set());
+      setItemCollections(new Map());
       const refreshed = await Promise.all(
         candidates.map((entry) => api.importBatch(entry.id)),
       );
@@ -383,6 +493,21 @@ export default function Home() {
             ),
           }))
           .filter((entry) => entry.items.length),
+      );
+    }
+  }
+
+  async function ingestConfirmedWorks() {
+    if (!confirmedWorkIds.length) return;
+    const workIds = [...confirmedWorkIds];
+    const accepted = await perform(
+      "ingest-confirmed",
+      () => api.ingest(workIds),
+      `已创建 ${workIds.length} 个作品的入库任务`,
+    );
+    if (accepted) {
+      setConfirmedWorkIds((current) =>
+        current.filter((workId) => !workIds.includes(workId)),
       );
     }
   }
@@ -498,14 +623,20 @@ export default function Home() {
             retainedBatches={retainedBatches}
             selected={selectedItems}
             setSelected={setSelectedItems}
+            itemCollections={itemCollections}
+            setItemCollections={setItemCollections}
             busy={busy}
             onSubmit={submitImport}
             onCancel={cancelBatch}
             onConfirm={confirmBatch}
+            onIngestConfirmed={ingestConfirmedWorks}
             onUpload={upload}
+            onDelete={removePreviewItem}
             settings={settings}
             usage={usage}
             summary={summary}
+            collections={collections}
+            confirmedWorkIds={confirmedWorkIds}
           />
         )}
         {tab === "library" && (
@@ -521,6 +652,7 @@ export default function Home() {
             reload={() => loadLibrary(false)}
             loadMore={() => loadLibrary(true)}
             perform={perform}
+            globalSummaryPrompt={settings?.summary_prompt || ""}
           />
         )}
         {tab === "chat" && (
@@ -584,14 +716,20 @@ function ImportWorkspace({
   retainedBatches,
   selected,
   setSelected,
+  itemCollections,
+  setItemCollections,
   busy,
   onSubmit,
   onCancel,
   onConfirm,
+  onIngestConfirmed,
   onUpload,
+  onDelete,
   settings,
   usage,
   summary,
+  collections,
+  confirmedWorkIds,
 }: {
   text: string;
   setText: (value: string) => void;
@@ -599,25 +737,40 @@ function ImportWorkspace({
   retainedBatches: ImportBatch[];
   selected: Set<number>;
   setSelected: (value: Set<number>) => void;
+  itemCollections: Map<number, number>;
+  setItemCollections: (value: Map<number, number>) => void;
   busy: string;
   onSubmit: (event: FormEvent) => void;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: (itemIds: number[]) => void;
+  onIngestConfirmed: () => void;
   onUpload: (item: ImportItem, files: File[]) => void;
+  onDelete: (item: ImportItem) => void;
   settings: RuntimeSettings | null;
   usage: Usage | null;
   summary: LibrarySummary;
+  collections: Collection[];
+  confirmedWorkIds: number[];
 }) {
   const active = batch && !TERMINAL_BATCH_STATES.has(batch.state);
   const completed = Number(batch?.progress.completed || 0);
   const percent = batch?.total_items ? Math.round((completed / batch.total_items) * 100) : 0;
-  const displayItems = [
+  const rawDisplayItems = [
     ...retainedBatches.flatMap((entry) => entry.items),
     ...(batch?.items || []),
   ].filter(
-    (item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index,
+    (item) =>
+      !(item.status === "duplicate" && item.error_code === "duplicate_input"),
+  );
+  const displayItems = rawDisplayItems.filter(
+    (item, index, items) =>
+      items.findIndex((candidate) => samePreviewWork(candidate, item)) === index,
   );
   const selectable = displayItems.filter((item) => item.status === "ready");
+  const selectedVisibleIds = selectable
+    .filter((item) => selected.has(item.id))
+    .map((item) => item.id);
+  const manualCollectionId = collections.find((group) => group.key === "manual-import")?.id;
   function toggle(id: number, checked: boolean) {
     const next = new Set(selected);
     if (checked) next.add(id); else next.delete(id);
@@ -653,7 +806,7 @@ function ImportWorkspace({
           </button>
         </div>
       </form>
-      {(batch || retainedBatches.length > 0) && (
+      {(batch || retainedBatches.length > 0 || confirmedWorkIds.length > 0) && (
         <section className="card batch-panel">
           {batch && <>
             <div className="section-head">
@@ -696,6 +849,26 @@ function ImportWorkspace({
                   <h3>{item.title || item.input_url}</h3>
                   <p>{item.author_name || "作者待识别"}{item.duration_seconds > 0 ? ` · ${Math.round(item.duration_seconds)} 秒` : ""}</p>
                   <p className="muted">{mediaPolicyLabel(item)}</p>
+                  {item.status === "ready" && (
+                    <label className="result-collection">
+                      <span>加入收藏夹</span>
+                      <select
+                        value={itemCollections.get(item.id) ?? manualCollectionId ?? ""}
+                        onChange={(event) => {
+                          const next = new Map(itemCollections);
+                          if (event.target.value) next.set(item.id, Number(event.target.value));
+                          else next.delete(item.id);
+                          setItemCollections(next);
+                        }}
+                      >
+                        {collections.map((group) => (
+                          <option key={group.id} value={group.id}>
+                            {group.title}{group.summary_prompt ? " · 专属提示词" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
                   {item.error_message && <p className="result-error">{item.error_message}</p>}
                   <div className="work-actions">
                     {item.existing_work_id && <a href={`/works/${item.existing_work_id}`}>查看现有作品</a>}
@@ -705,17 +878,68 @@ function ImportWorkspace({
                         <input type="file" multiple accept=".mp4,.mov,.mkv,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp" disabled={busy === `upload-${item.id}`} onChange={(event) => onUpload(item, Array.from(event.target.files || []))} />
                       </label>
                     )}
+                    {!["queued", "resolving"].includes(item.status) && (
+                      <button
+                        className="danger"
+                        disabled={busy === `remove-preview-${item.id}`}
+                        onClick={() => onDelete(item)}
+                      >
+                        {busy === `remove-preview-${item.id}` ? "删除中…" : "删除预检结果"}
+                      </button>
+                    )}
                   </div>
                 </div>
               </article>
             ))}
           </div>
-          {!!selectable.length && (
+          {(!!selectable.length || confirmedWorkIds.length > 0) && (
             <div className="confirm-bar">
-              <div><strong>已选择 {selected.size} 个作品</strong><small>允许下载的作品走完整流程；其他作品只处理字幕、音频或基础信息</small></div>
+              <div>
+                <strong>
+                  {selectedVisibleIds.length > 0 && confirmedWorkIds.length > 0
+                    ? `已勾选待确认 ${selectedVisibleIds.length} 个 · 已确认待入库 ${confirmedWorkIds.length} 个`
+                    : confirmedWorkIds.length > 0
+                      ? `已确认待入库 ${confirmedWorkIds.length} 个作品`
+                      : `已勾选待确认 ${selectedVisibleIds.length} 个作品`}
+                </strong>
+                <small>
+                  {selectedVisibleIds.length > 0 && confirmedWorkIds.length > 0
+                    ? "新勾选作品需先确认；已确认作品可直接入库，两组操作互不影响"
+                    : confirmedWorkIds.length > 0
+                      ? "点击“入库”即可处理已经确认的作品"
+                      : "勾选项尚未加入待入库，请先确认并保留上方收藏夹设置"}
+                </small>
+              </div>
               <div className="button-row">
-                <button className="link" onClick={() => setSelected(new Set(selectable.map((item) => item.id)))}>选择全部可确认项</button>
-                <button className="primary" disabled={!selected.size || busy === "confirm"} onClick={onConfirm}>确认并入库</button>
+                {!!selectable.length && (
+                  <button
+                    className="link"
+                    disabled={!!busy}
+                    onClick={() => setSelected(new Set(selectable.map((item) => item.id)))}
+                  >
+                    选择全部可确认项
+                  </button>
+                )}
+                {!!selectable.length && (
+                  <button
+                    className={confirmedWorkIds.length > 0 ? "secondary" : "primary"}
+                    disabled={!selectedVisibleIds.length || !!busy}
+                    onClick={() => onConfirm(selectedVisibleIds)}
+                  >
+                    {busy === "confirm"
+                      ? "正在确认…"
+                      : `确认加入待入库（${selectedVisibleIds.length}）`}
+                  </button>
+                )}
+                {confirmedWorkIds.length > 0 && (
+                  <button
+                    className="primary"
+                    disabled={!!busy}
+                    onClick={onIngestConfirmed}
+                  >
+                    {busy === "ingest-confirmed" ? "正在创建入库任务…" : `入库（${confirmedWorkIds.length}）`}
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -736,6 +960,7 @@ function Library({
   reload,
   loadMore,
   perform,
+  globalSummaryPrompt,
 }: {
   state: LibraryState;
   setState: (value: LibraryState) => void;
@@ -747,13 +972,27 @@ function Library({
   reload: () => Promise<void>;
   loadMore: () => Promise<void>;
   perform: (name: string, operation: () => Promise<unknown>, success: string) => Promise<boolean>;
+  globalSummaryPrompt: string;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [creatingCollection, setCreatingCollection] = useState(false);
   const [newCollectionTitle, setNewCollectionTitle] = useState("");
   const [targetCollectionId, setTargetCollectionId] = useState<number | null>(null);
+  const [editingCollectionPrompt, setEditingCollectionPrompt] = useState(false);
+  const activeCollection = collections.find((group) => group.id === collectionId);
+  const [collectionPromptDraft, setCollectionPromptDraft] = useState(
+    activeCollection?.summary_prompt || globalSummaryPrompt,
+  );
   const selectedWorks = page.items.filter((work) => selected.has(work.id));
   const canOrganize = state === "pending" || state === "in_library";
+  async function ingestSelected() {
+    if (!selected.size) return;
+    const count = selected.size;
+    if (await perform("ingest-selected", () => api.ingest([...selected]), `已创建 ${count} 个作品的入库任务`)) {
+      setSelected(new Set());
+      await reload();
+    }
+  }
   async function summarize() {
     if (!selected.size) return;
     if (await perform("summarize", () => api.summarize([...selected]), `已创建 ${selected.size} 个作品的总结任务`)) setSelected(new Set());
@@ -806,6 +1045,21 @@ function Library({
     setSelected(new Set());
     await reload();
   }
+  async function saveCollectionPrompt(value: string | null = collectionPromptDraft) {
+    if (!activeCollection) return;
+    const prompt = value?.trim() || null;
+    const ok = await perform(
+      "collection-prompt",
+      () => api.updateCollectionSummaryPrompt(activeCollection.id, prompt),
+      prompt
+        ? `收藏夹“${activeCollection.title}”的专属总结提示词已保存`
+        : `收藏夹“${activeCollection.title}”已改用全局总结提示词`,
+    );
+    if (!ok) return;
+    setCollectionPromptDraft(prompt || "");
+    setEditingCollectionPrompt(false);
+    await reload();
+  }
   return (
     <section className="library-layout stack">
       <div className="library-toolbar">
@@ -849,11 +1103,52 @@ function Library({
               <button className="secondary" onClick={chooseImageFolder}>设置图片统一存放位置</button>
             )}
             {canOrganize && <button className="secondary" onClick={() => setCreatingCollection((value) => !value)}>新建收藏夹</button>}
+            {activeCollection && (
+              <button
+                className="secondary"
+                onClick={() => {
+                  setCollectionPromptDraft(
+                    activeCollection.summary_prompt || globalSummaryPrompt,
+                  );
+                  setEditingCollectionPrompt((value) => !value);
+                }}
+              >
+                设置总结提示词
+              </button>
+            )}
             {canOrganize && <button className="secondary" onClick={() => setSelected(new Set(page.items.map((work) => work.id)))}>选择当前页</button>}
             {canOrganize && <button className="link" onClick={() => setSelected(new Set())}>取消选择</button>}
           </div>
         </div>
       </div>
+      {activeCollection && editingCollectionPrompt && (
+        <section className="card collection-prompt-editor">
+          <div className="section-head">
+            <div>
+              <span className="kicker">收藏夹专属 AI 规则</span>
+              <h3>{activeCollection.title}</h3>
+            </div>
+            <small>{collectionPromptDraft.length.toLocaleString()} / 12,000</small>
+          </div>
+          <textarea
+            maxLength={12000}
+            value={collectionPromptDraft}
+            onChange={(event) => setCollectionPromptDraft(event.target.value)}
+            placeholder="请输入这个收藏夹专用的总结提示词"
+          />
+          <div className="collection-prompt-foot">
+            <small>
+              {activeCollection.summary_prompt
+                ? "当前使用收藏夹专属提示词。修改只影响之后新入库或重新生成的总结。"
+                : "当前继承全局提示词，已作为可编辑正文载入；保存后会成为这个收藏夹的专属提示词。"}
+            </small>
+            <div className="button-row">
+              <button className="link" onClick={() => saveCollectionPrompt(null)}>使用全局提示词</button>
+              <button className="primary" disabled={!collectionPromptDraft.trim()} onClick={() => saveCollectionPrompt()}>保存专属提示词</button>
+            </div>
+          </div>
+        </section>
+      )}
       <div className="work-grid">
         {page.items.map((work) => (
           <article className={`work-card ${selected.has(work.id) ? "selected" : ""}`} key={work.id}>
@@ -870,7 +1165,15 @@ function Library({
                 {state === "pending" && <button onClick={() => perform("ingest-one", () => api.retry(work.id), "已创建入库任务").then(reload)}>开始入库</button>}
                 {state === "issues" && <button onClick={() => perform("retry", () => api.retry(work.id), "已创建重试任务").then(reload)}>重新处理</button>}
                 {state === "archived" && <button onClick={() => perform("restore", () => api.restore(work.id), "作品已恢复").then(reload)}>恢复</button>}
-                {state === "archived" && <button className="danger" onClick={() => window.confirm("确认永久删除作品及本地资产？") && perform("remove", () => api.remove(work.id), "作品已删除").then(reload)}>永久删除</button>}
+                <button
+                  className="danger"
+                  onClick={() =>
+                    window.confirm("确认永久删除这个作品、总结、索引与本地资产？此操作不可恢复。")
+                    && perform(`remove-${work.id}`, () => api.remove(work.id), "作品已永久删除").then(reload)
+                  }
+                >
+                  永久删除
+                </button>
               </div>
               {(work.error_code || work.process_error) && <div className="technical-details" aria-label="技术详情"><span className="technical-details-title">技术详情</span>{work.error_code && <small className="error-code">{work.error_code}</small>}{work.process_error && <small className="work-error">{work.process_error}</small>}</div>}
             </div>
@@ -891,6 +1194,7 @@ function Library({
               {collections.map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}
             </select>
             <button className="secondary" disabled={!targetCollectionId} onClick={addToCollection}>加入收藏夹</button>
+            {state === "pending" && <button className="primary" onClick={ingestSelected}>批量开始入库</button>}
             {state === "in_library" && <button className="secondary" onClick={summarize}>补齐/更新总结</button>}
             {state === "in_library" && <button className="primary" onClick={exportNotes}>导出到 Obsidian</button>}
           </div>

@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.services.budget import BudgetExceeded, consume, record_usage, release, reserve
 from app.services.content_pipeline import process_work
+from app.services.collection_prompts import summary_prompt_for_work
 from app.services.errors import classify_error, safe_error_message
 from app.services.f2_links import F2WorkClient, PublicLinkError
 from app.services.import_queue import open_f2_circuit, resolve_submitted_link
@@ -533,10 +534,15 @@ async def _summarize_works(session: AsyncSession, job: Job) -> bool:
                 ),
             )
             await session.commit()
+            summary_prompt = await summary_prompt_for_work(
+                session,
+                work.id,
+                str(runtime.get("summary_prompt") or ""),
+            )
             payload, usage = await provider.summarize(
                 source_text,
                 asset_ids=local_asset_names(work),
-                system_prompt=str(runtime.get("summary_prompt") or ""),
+                system_prompt=summary_prompt,
                 model=str(runtime.get("processing_model") or settings.enrichment_model),
             )
             await record_usage(

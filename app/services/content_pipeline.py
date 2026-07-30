@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import DATA_DIR, settings
 from app.models import Keyframe, KnowledgeChunk, Work, WorkSourceAsset
 from app.services.budget import record_usage
+from app.services.collection_prompts import summary_prompt_for_work
 from app.services.downloader import DownloadError, download_media, download_subtitle
 from app.services.f2_links import PublicLinkError
 from app.services.keyframes import extract_keyframes
@@ -407,10 +408,15 @@ async def process_work(
                 raise ocr_error
 
         combined = "\n\n".join(f"[{kind}] {text}" for kind, text, _ in material if text)
+        summary_prompt = await summary_prompt_for_work(
+            session,
+            work.id,
+            str(runtime.get("summary_prompt") or ""),
+        )
         summary, summary_usage = await provider.summarize(
             combined,
             asset_ids=local_asset_names(work),
-            system_prompt=str(runtime.get("summary_prompt") or ""),
+            system_prompt=summary_prompt,
             model=str(runtime.get("processing_model") or settings.enrichment_model),
         )
         pending_usages.append(summary_usage)

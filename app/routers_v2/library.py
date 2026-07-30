@@ -25,6 +25,8 @@ from app.models import (
 from app.schemas import (
     CollectionAssignment,
     CollectionCreate,
+    CollectionUpdate,
+    IngestCreate,
     ObsidianManifestRequest,
     RetryBatchRequest,
     SummaryCreate,
@@ -133,6 +135,7 @@ async def collections(session: AsyncSession = Depends(get_db)):
                 "key": group.key,
                 "title": group.title,
                 "cover_url": group.cover_url,
+                "summary_prompt": group.summary_prompt,
                 "item_count": total,
                 "local_item_count": local,
                 "pending_count": pending,
@@ -188,10 +191,32 @@ async def create_collection(
         "key": group.key,
         "title": group.title,
         "cover_url": group.cover_url,
+        "summary_prompt": group.summary_prompt,
         "item_count": 0,
         "local_item_count": 0,
         "pending_count": 0,
         "issue_count": 0,
+    }
+
+
+@router.put("/collections/{collection_id}")
+async def update_collection(
+    collection_id: int,
+    payload: CollectionUpdate,
+    session: AsyncSession = Depends(get_db),
+):
+    group = await session.get(Collection, collection_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="收藏夹不存在")
+    prompt = str(payload.summary_prompt or "").strip()
+    group.summary_prompt = prompt or None
+    await session.commit()
+    return {
+        "id": group.id,
+        "key": group.key,
+        "title": group.title,
+        "cover_url": group.cover_url,
+        "summary_prompt": group.summary_prompt,
     }
 
 
@@ -340,6 +365,18 @@ async def create_summary_job(
         return job_to_dict(
             await enqueue_summary_job(session, work_ids=payload.work_ids)
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/ingest/jobs")
+async def create_ingest_job(
+    payload: IngestCreate, session: AsyncSession = Depends(get_db)
+):
+    try:
+        job = await enqueue_ingest_job(session, work_ids=payload.work_ids)
+        await session.commit()
+        return job_to_dict(job)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -574,18 +611,29 @@ async def permanently_delete_work(
     )
     await session.delete(work)
     await session.commit()
+    assets_deleted = True
     for source_path in source_paths:
         path = Path(source_path)
         root = (DATA_DIR / "source-assets").resolve()
         try:
             resolved = path.resolve()
         except OSError:
+            assets_deleted = False
             continue
         if root in resolved.parents:
-            resolved.unlink(missing_ok=True)
+            try:
+                resolved.unlink(missing_ok=True)
+            except OSError:
+                # The database deletion has already committed. A transient
+                # Windows file lock must not turn that successful deletion
+                # into a misleading API failure.
+                assets_deleted = False
+                continue
     for asset_root in (DATA_DIR / "media", DATA_DIR / "keyframes"):
         root = asset_root.resolve()
         target = (root / platform_work_id).resolve()
         if root in target.parents:
             shutil.rmtree(target, ignore_errors=True)
-    return {"deleted": True, "id": work_id, "assets_deleted": True}
+            if target.exists():
+                assets_deleted = False
+    return {"deleted": True, "id": work_id, "assets_deleted": assets_deleted}

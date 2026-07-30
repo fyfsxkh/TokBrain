@@ -85,6 +85,7 @@ export type ImportItem = {
   id: number;
   ordinal: number;
   input_url: string;
+  normalized_url: string;
   canonical_url: string | null;
   platform_work_id: string | null;
   kind: string | null;
@@ -132,10 +133,17 @@ export type Collection = {
   key: string;
   title: string;
   cover_url?: string | null;
+  summary_prompt?: string | null;
   item_count: number;
   local_item_count: number;
   pending_count: number;
   issue_count: number;
+};
+
+export type ImportConfirmation = {
+  confirmed_count: number;
+  work_ids: number[];
+  library_state: "pending";
 };
 
 export type LibrarySummary = {

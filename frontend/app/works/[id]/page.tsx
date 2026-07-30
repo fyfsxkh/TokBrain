@@ -17,6 +17,7 @@ export default function WorkSummaryPage() {
   const workId = Number(params.id);
   const [detail, setDetail] = useState<WorkSummaryDetail | null>(null);
   const [error, setError] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!Number.isFinite(workId)) return;
@@ -33,6 +34,20 @@ export default function WorkSummaryPage() {
   );
   const goBack = () =>
     window.location.assign("/?tab=library&state=in_library&view=works");
+  const removeWork = async () => {
+    if (!window.confirm("确认永久删除这个作品、总结、索引与本地资产？此操作不可恢复。")) {
+      return;
+    }
+    setDeleting(true);
+    setError("");
+    try {
+      await api.remove(workId);
+      goBack();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "删除作品失败");
+      setDeleting(false);
+    }
+  };
 
   if (error) {
     return (
@@ -68,6 +83,9 @@ export default function WorkSummaryPage() {
                 查看公开原作品
               </a>
             )}
+            <button className="danger" disabled={deleting} onClick={removeWork}>
+              {deleting ? "删除中…" : "永久删除"}
+            </button>
             <span>
               总结时间：
               {detail.summary.generated_at
