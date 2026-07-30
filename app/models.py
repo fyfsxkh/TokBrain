@@ -54,6 +54,7 @@ class Collection(Base):
     key: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     title: Mapped[str] = mapped_column(String(300))
     cover_url: Mapped[str | None] = mapped_column(Text)
+    summary_prompt: Mapped[str | None] = mapped_column(Text)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(

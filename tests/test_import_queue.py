@@ -1,12 +1,15 @@
+import asyncio
 from datetime import date
 
 import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.routers_v2.imports as import_routes
 import app.services.import_queue as imports
 from app.models import (
     Base,
+    Collection,
     CollectionMembership,
     DailyLinkQuota,
     ImportBatch,
@@ -21,6 +24,7 @@ from app.services.import_queue import (
     circuit_state,
     confirm_import_items,
     create_import_batch,
+    delete_import_item,
     remaining_daily_quota,
 )
 from app.services.f2_links import (
@@ -28,6 +32,7 @@ from app.services.f2_links import (
     PublicLinkError,
     PublicWork,
 )
+from app.schemas import ImportBatchCreate
 
 
 async def database_factory(tmp_path):
@@ -91,6 +96,26 @@ class FakeClient:
         )
 
 
+class SameWorkClient(FakeClient):
+    async def resolve(self, url: str, *, cookie: str = "") -> PublicWork:
+        self.calls.append(url)
+        return PublicWork(
+            platform_work_id="7350000000000000599",
+            canonical_url="https://www.douyin.com/video/7350000000000000599",
+            kind="video",
+            title="同一个短链作品",
+            download_permission="allowed",
+            processing_mode="full_media",
+            media_urls=["https://v3-web.douyinvod.com/video.mp4"],
+            raw_metadata={
+                "media_policy": {
+                    "download_permission": "allowed",
+                    "processing_mode": "full_media",
+                }
+            },
+        )
+
+
 async def no_sleep(_seconds: float) -> None:
     return None
 
@@ -104,14 +129,15 @@ def install_test_runtime(monkeypatch, factory):
     )
 
 
-async def test_batch_limit_dedupes_normalized_url_and_reports_overflow(tmp_path):
+async def test_batch_limit_applies_after_duplicate_links_are_removed(tmp_path):
     engine, factory = await database_factory(tmp_path)
     async with factory() as session:
-        links = [f"https://v.douyin.com/item-{index}/" for index in range(9)]
-        links.append("https://v.douyin.com/item-0/?tracking=ignored")
-        links.extend(
-            ["https://v.douyin.com/overflow-1", "https://v.douyin.com/overflow-2"]
-        )
+        links = [
+            "https://v.douyin.com/item-0/",
+            "https://v.douyin.com/item-0/?first-copy=ignored",
+            "https://v.douyin.com/item-0/?second-copy=ignored",
+            *[f"https://v.douyin.com/item-{index}/" for index in range(12)],
+        ]
         batch, queued, rejected = await create_import_batch(session, "\n".join(links))
         items = (
             (
@@ -122,15 +148,192 @@ async def test_batch_limit_dedupes_normalized_url_and_reports_overflow(tmp_path)
             .scalars()
             .all()
         )
-        duplicate = [item for item in items if item.status == "duplicate"]
         job = await session.get(Job, batch.job_id)
         assert batch.total_items == 10
         assert len(items) == 10
-        assert len(queued) == 9
+        assert len(queued) == 10
         assert rejected == 2
-        assert len(duplicate) == 1
-        assert duplicate[0].error_code == "duplicate_input"
+        assert job.progress["duplicates"] == 3
         assert job.progress["rejected_count"] == 2
+    await engine.dispose()
+
+
+async def test_duplicate_link_in_same_submission_is_removed_while_unique_links_queue(
+    tmp_path,
+):
+    engine, factory = await database_factory(tmp_path)
+    async with factory() as session:
+        batch, queued, rejected = await create_import_batch(
+            session,
+            "\n".join(
+                [
+                    "https://v.douyin.com/item-0/",
+                    "https://v.douyin.com/item-1/",
+                    "https://v.douyin.com/item-0/?tracking=ignored",
+                ]
+            )
+        )
+        items = (
+            await session.execute(
+                select(ImportItem)
+                .where(ImportItem.batch_id == batch.id)
+                .order_by(ImportItem.ordinal)
+            )
+        ).scalars().all()
+
+        assert rejected == 0
+        assert len(queued) == 2
+        job = await session.get(Job, batch.job_id)
+        assert [item.status for item in items] == ["queued", "queued"]
+        assert job.progress["duplicates"] == 1
+        assert await session.scalar(select(func.count(ImportBatch.id))) == 1
+        assert await session.scalar(select(func.count(ImportItem.id))) == 2
+        assert await session.scalar(select(func.count(Job.id))) == 1
+    await engine.dispose()
+
+
+async def test_create_route_reports_removed_and_queued_link_counts(
+    tmp_path, monkeypatch
+):
+    engine, factory = await database_factory(tmp_path)
+    enqueued: list[int] = []
+
+    async def capture(item_ids: list[int]) -> None:
+        enqueued.extend(item_ids)
+
+    monkeypatch.setattr(import_routes.coordinator, "enqueue", capture)
+    async with factory() as session:
+        result = await import_routes.create_batch(
+            ImportBatchCreate(
+                text="\n".join(
+                    [
+                        "https://v.douyin.com/item-0/",
+                        "https://v.douyin.com/item-1/",
+                        "https://v.douyin.com/item-0/?tracking=ignored",
+                    ]
+                )
+            ),
+            session,
+        )
+
+    assert result["accepted_count"] == 2
+    assert result["queued_count"] == 2
+    assert result["duplicate_count"] == 1
+    assert result["rejected_count"] == 0
+    assert len(enqueued) == 2
+    await engine.dispose()
+
+
+async def test_same_link_in_a_later_batch_is_removed_without_new_preview_work(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    url = "https://www.douyin.com/video/7350000000000000501"
+    async with factory() as session:
+        first_batch, first_ids, _ = await create_import_batch(session, url)
+        first = await session.get(ImportItem, first_ids[0])
+        first.status = "ready"
+        first.title = "唯一预检结果"
+        await imports._refresh_batch(session, first_batch.id)
+        await session.commit()
+
+        second_batch, second_queued, _ = await create_import_batch(session, url)
+        second_job = await session.get(Job, second_batch.job_id)
+
+        assert second_queued == []
+        assert second_batch.total_items == 0
+        assert second_job.progress["duplicates"] == 1
+        assert second_batch.state == "succeeded"
+        assert second_job.state == "succeeded"
+        assert await session.scalar(select(func.count(ImportBatch.id))) == 2
+        assert await session.scalar(select(func.count(ImportItem.id))) == 1
+        assert await session.scalar(select(func.count(Job.id))) == 2
+    await engine.dispose()
+
+
+async def test_later_batch_removes_previewed_link_and_queues_new_link(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    existing_url = "https://www.douyin.com/video/7350000000000000503"
+    new_url = "https://www.douyin.com/video/7350000000000000504"
+    async with factory() as session:
+        first_batch, first_ids, _ = await create_import_batch(session, existing_url)
+        first = await session.get(ImportItem, first_ids[0])
+        first.status = "ready"
+        first.title = "已预检作品"
+        await imports._refresh_batch(session, first_batch.id)
+        await session.commit()
+
+        second_batch, second_queued, _ = await create_import_batch(
+            session, f"{existing_url}\n{new_url}"
+        )
+        second_items = (
+            await session.execute(
+                select(ImportItem).where(ImportItem.batch_id == second_batch.id)
+            )
+        ).scalars().all()
+        second_job = await session.get(Job, second_batch.job_id)
+
+        assert len(second_queued) == 1
+        assert len(second_items) == 1
+        assert second_items[0].normalized_url == new_url
+        assert second_items[0].status == "queued"
+        assert second_job.progress["duplicates"] == 1
+    await engine.dispose()
+
+
+async def test_concurrent_same_link_submissions_queue_only_one_preview_item(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    url = "https://www.douyin.com/video/7350000000000000502"
+
+    async def submit():
+        async with factory() as session:
+            batch, item_ids, _ = await create_import_batch(session, url)
+            return batch.id, item_ids
+
+    results = await asyncio.gather(submit(), submit())
+    assert sorted(len(result[1]) for result in results) == [0, 1]
+
+    async with factory() as session:
+        items = (await session.execute(select(ImportItem))).scalars().all()
+        jobs = (await session.execute(select(Job))).scalars().all()
+        assert [item.status for item in items] == ["queued"]
+        assert sum(int(job.progress.get("duplicates", 0)) for job in jobs) == 1
+        assert await session.scalar(select(func.count(ImportBatch.id))) == 2
+        assert await session.scalar(select(func.count(ImportItem.id))) == 1
+        assert await session.scalar(select(func.count(Job.id))) == 2
+    await engine.dispose()
+
+
+async def test_different_short_links_resolving_to_same_work_keep_one_preview(
+    tmp_path, monkeypatch
+):
+    engine, factory = await database_factory(tmp_path)
+    install_test_runtime(monkeypatch, factory)
+    async with factory() as session:
+        first_batch, first_ids, _ = await create_import_batch(
+            session, "https://v.douyin.com/short-alias-a/"
+        )
+        second_batch, second_ids, _ = await create_import_batch(
+            session, "https://v.douyin.com/short-alias-b/"
+        )
+
+    client = SameWorkClient()
+    coordinator = ImportCoordinator(client=client)
+    await coordinator._process_item(first_ids[0], 1)
+    await coordinator._process_item(second_ids[0], 2)
+
+    async with factory() as session:
+        first = await session.get(ImportItem, first_ids[0])
+        second = await session.get(ImportItem, second_ids[0])
+        first_stored_batch = await session.get(ImportBatch, first_batch.id)
+        second_stored_batch = await session.get(ImportBatch, second_batch.id)
+
+        assert first.status == "ready"
+        assert first.error_code is None
+        assert second.status == "duplicate"
+        assert second.error_code == "duplicate_input"
+        assert first.platform_work_id == second.platform_work_id
+        assert first_stored_batch.state == "succeeded"
+        assert second_stored_batch.state == "succeeded"
+        assert await session.scalar(select(func.count(Work.id))) == 0
     await engine.dispose()
 
 
@@ -192,6 +395,67 @@ async def test_preview_is_persisted_without_creating_work_or_ai_job(
         assert (
             await session.get(DailyLinkQuota, imports.shanghai_day())
         ).attempted == 1
+    await engine.dispose()
+
+
+async def test_completed_preview_item_can_be_deleted_without_deleting_batch(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    async with factory() as session:
+        batch, item_ids, _ = await create_import_batch(
+            session,
+            "\n".join(
+                [
+                    "https://www.douyin.com/video/7350000000000000401",
+                    "https://www.douyin.com/video/7350000000000000402",
+                ]
+            ),
+        )
+        for item_id in item_ids:
+            item = await session.get(ImportItem, item_id)
+            item.status = "ready"
+            item.title = f"待确认 {item_id}"
+        await imports._refresh_batch(session, batch.id)
+        await session.commit()
+
+        deleted_batch_id = await delete_import_item(session, item_ids[0])
+        view = await imports.batch_view(session, batch.id)
+        job = await session.get(Job, batch.job_id)
+
+        assert deleted_batch_id == batch.id
+        assert await session.get(ImportItem, item_ids[0]) is None
+        assert [item["id"] for item in view["items"]] == [item_ids[1]]
+        assert view["total_items"] == 1
+        assert job.total_items == 1
+    await engine.dispose()
+
+
+async def test_confirmed_preview_item_can_be_deleted_without_deleting_work(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    async with factory() as session:
+        batch, item_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/video/7350000000000000403"
+        )
+        item = await session.get(ImportItem, item_ids[0])
+        item.status = "ready"
+        item.title = "已确认待入库作品"
+        await imports._refresh_batch(session, batch.id)
+        await session.commit()
+
+        confirmation = await confirm_import_items(session, batch.id, item_ids)
+        work_id = confirmation["work_ids"][0]
+        deleted_batch_id = await delete_import_item(session, item_ids[0])
+
+        assert deleted_batch_id == batch.id
+        assert await session.get(ImportItem, item_ids[0]) is None
+        work = await session.get(Work, work_id)
+        assert work is not None
+        assert work.library_state == "pending"
+        membership = await session.scalar(
+            select(CollectionMembership).where(
+                CollectionMembership.work_id == work_id
+            )
+        )
+        assert membership is not None
     await engine.dispose()
 
 
@@ -386,7 +650,7 @@ async def test_startup_always_launches_three_workers_and_never_resumes_access(
     await engine.dispose()
 
 
-async def test_confirmation_creates_manual_group_work_and_ingest_job(
+async def test_confirmation_creates_pending_work_in_selected_collection_without_ingest_job(
     tmp_path, monkeypatch
 ):
     engine, factory = await database_factory(tmp_path)
@@ -398,13 +662,74 @@ async def test_confirmation_creates_manual_group_work_and_ingest_job(
     coordinator = ImportCoordinator(client=FakeClient())
     await coordinator._process_item(item_ids[0], 3)
     async with factory() as session:
-        job = await confirm_import_items(session, batch.id, item_ids)
+        group = Collection(
+            key="local-learning",
+            title="学习",
+            summary_prompt="只总结可执行步骤",
+        )
+        session.add(group)
+        await session.commit()
+        result = await confirm_import_items(
+            session,
+            batch.id,
+            item_ids,
+            collection_ids={item_ids[0]: group.id},
+        )
         work = (await session.execute(select(Work))).scalar_one()
         membership = (await session.execute(select(CollectionMembership))).scalar_one()
         item = await session.get(ImportItem, item_ids[0])
-        assert job.job_type == "ingest"
+        ingest_jobs = int(
+            await session.scalar(
+                select(func.count(Job.id)).where(Job.job_type == "ingest")
+            )
+            or 0
+        )
+        assert result == {
+            "confirmed_count": 1,
+            "work_ids": [work.id],
+            "library_state": "pending",
+        }
+        assert ingest_jobs == 0
         assert work.library_state == "pending"
         assert membership.work_id == work.id
+        assert membership.collection_id == group.id
         assert item.status == "confirmed"
         assert item.existing_work_id == work.id
+    await engine.dispose()
+
+
+async def test_confirming_cross_batch_duplicate_is_idempotent(tmp_path):
+    engine, factory = await database_factory(tmp_path)
+    async with factory() as session:
+        first_batch, first_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/video/7350000000000000601"
+        )
+        second_batch, second_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/video/7350000000000000602"
+        )
+        for item_id in [first_ids[0], second_ids[0]]:
+            item = await session.get(ImportItem, item_id)
+            item.status = "ready"
+            item.platform_work_id = "7350000000000000699"
+            item.title = "同一个作品"
+        await imports._refresh_batch(session, first_batch.id)
+        await imports._refresh_batch(session, second_batch.id)
+        await session.commit()
+
+        first_result = await confirm_import_items(
+            session, first_batch.id, first_ids
+        )
+        second_result = await confirm_import_items(
+            session, second_batch.id, second_ids
+        )
+        works = (await session.execute(select(Work))).scalars().all()
+        second_item = await session.get(ImportItem, second_ids[0])
+
+        assert len(works) == 1
+        assert first_result["work_ids"] == [works[0].id]
+        assert second_result["work_ids"] == [works[0].id]
+        assert second_result["confirmed_count"] == 1
+        assert second_item.status == "confirmed"
+        assert second_item.error_code is None
+        assert second_item.existing_work_id == works[0].id
     await engine.dispose()

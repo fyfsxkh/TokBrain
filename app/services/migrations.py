@@ -18,7 +18,7 @@ from app.models import Base
 
 DB_PATH = DATA_DIR / "douyin_rag.db"
 SCHEMA_KEY = "schema"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REMOVED_SETTING_KEYS = {
     "active_account",
     "adapter_health_state",
@@ -71,7 +71,7 @@ def backup_before_upgrade(path: Path = DB_PATH) -> Path | None:
         return None
     backup_dir = path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    target = backup_dir / f"douyin_rag-pre-v4-{datetime.now():%Y%m%d-%H%M%S}.db"
+    target = backup_dir / f"douyin_rag-pre-v5-{datetime.now():%Y%m%d-%H%M%S}.db"
     source = sqlite3.connect(path)
     destination = sqlite3.connect(target)
     try:
@@ -236,7 +236,7 @@ def _copy_legacy_data(source: sqlite3.Connection, target: sqlite3.Connection) ->
 
 
 def migrate_to_v4(path: Path = DB_PATH) -> None:
-    if not schema_upgrade_needed(path):
+    if not path.exists() or _schema_version(path) >= 4:
         return
     temp = path.with_name(f"{path.stem}.v4-migrating{path.suffix}")
     temp.unlink(missing_ok=True)
@@ -269,6 +269,35 @@ def migrate_to_v4(path: Path = DB_PATH) -> None:
     os.replace(temp, path)
 
 
+def migrate_to_v5(path: Path = DB_PATH) -> None:
+    """Add collection prompts without rebuilding or dropping v4 queue data."""
+
+    if not path.exists() or _schema_version(path) >= 5:
+        return
+    connection = sqlite3.connect(path)
+    try:
+        if (
+            _table_exists(connection, "collections")
+            and "summary_prompt" not in _columns(connection, "collections")
+        ):
+            connection.execute("ALTER TABLE collections ADD COLUMN summary_prompt TEXT")
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": SCHEMA_VERSION}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def cleanup_legacy_browser_profile() -> bool:
     profile = DATA_DIR / "browser-profile"
     if not profile.exists():
@@ -286,6 +315,7 @@ def persist_security_cleanup_state(path: Path = DB_PATH) -> bool:
         return clean
     connection = sqlite3.connect(path)
     try:
+        now = datetime.now(timezone.utc).isoformat()
         value = json.dumps(
             {
                 "required": not clean,
@@ -303,7 +333,7 @@ def persist_security_cleanup_state(path: Path = DB_PATH) -> bool:
             VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
             """,
-            ("security_cleanup", value, datetime.now(timezone.utc).isoformat()),
+            ("security_cleanup", value, now),
         )
         connection.execute(
             """
@@ -314,6 +344,15 @@ def persist_security_cleanup_state(path: Path = DB_PATH) -> bool:
             """
         )
         connection.execute("DELETE FROM secret_records WHERE name='douyin_cookie'")
+        if _table_exists(connection, "collections"):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO collections(
+                  key, title, cover_url, summary_prompt, sort_order, created_at, updated_at
+                ) VALUES ('manual-import', '手动导入', NULL, NULL, -1, ?, ?)
+                """,
+                (now, now),
+            )
         connection.execute(
             """
             INSERT INTO app_settings(key, value, updated_at)
@@ -323,7 +362,7 @@ def persist_security_cleanup_state(path: Path = DB_PATH) -> bool:
             (
                 SCHEMA_KEY,
                 json.dumps({"version": SCHEMA_VERSION}),
-                datetime.now(timezone.utc).isoformat(),
+                now,
             ),
         )
         connection.commit()
@@ -335,6 +374,7 @@ def persist_security_cleanup_state(path: Path = DB_PATH) -> bool:
 def prepare_database(path: Path = DB_PATH) -> Path | None:
     backup = backup_before_upgrade(path)
     migrate_to_v4(path)
+    migrate_to_v5(path)
     persist_security_cleanup_state(path)
     return backup
 

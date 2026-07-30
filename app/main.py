@@ -21,7 +21,7 @@ from app.services.jobs import coordinator as job_coordinator
 from app.services.temp_files import cleanup_stale_temp_media
 
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.4.0"
 API_CONTRACT_VERSION = 4
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]

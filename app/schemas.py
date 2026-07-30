@@ -98,8 +98,15 @@ class ImportBatchCreate(BaseModel):
     text: str = Field(min_length=1, max_length=100000)
 
 
+class ImportSelection(BaseModel):
+    item_id: int
+    collection_id: int
+
+
 class ImportConfirm(BaseModel):
-    item_ids: list[int] = Field(min_length=1, max_length=10)
+    # Kept for compatibility. Items without an explicit collection use 手动导入.
+    item_ids: list[int] = Field(default_factory=list, max_length=10)
+    items: list[ImportSelection] = Field(default_factory=list, max_length=10)
 
 
 class JobView(BaseModel):
@@ -162,7 +169,15 @@ class CollectionCreate(BaseModel):
     title: str = Field(min_length=1, max_length=100)
 
 
+class CollectionUpdate(BaseModel):
+    summary_prompt: str | None = Field(default=None, max_length=12000)
+
+
 class CollectionAssignment(BaseModel):
+    work_ids: list[int] = Field(min_length=1, max_length=1000)
+
+
+class IngestCreate(BaseModel):
     work_ids: list[int] = Field(min_length=1, max_length=1000)
 
 

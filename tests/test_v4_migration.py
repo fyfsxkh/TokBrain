@@ -5,6 +5,7 @@ from pathlib import Path
 from app.services.migrations import (
     backup_before_upgrade,
     migrate_to_v4,
+    migrate_to_v5,
     schema_upgrade_needed,
 )
 
@@ -233,5 +234,61 @@ def test_v4_migration_backs_up_merges_accounts_and_drops_legacy_tables(tmp_path)
         assert connection.execute("SELECT COUNT(*) FROM keyframes").fetchone()[0] == 1
         assert connection.execute("SELECT one_sentence FROM work_summaries").fetchone()[0] == "保留总结"
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
+    finally:
+        connection.close()
+
+
+def test_v5_adds_collection_prompt_without_rebuilding_v4_data(tmp_path):
+    path = tmp_path / "douyin_rag.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE app_settings (
+          key TEXT PRIMARY KEY, value JSON NOT NULL, updated_at DATETIME NOT NULL
+        );
+        CREATE TABLE collections (
+          id INTEGER PRIMARY KEY,
+          key TEXT NOT NULL UNIQUE,
+          title TEXT NOT NULL,
+          cover_url TEXT,
+          sort_order INTEGER NOT NULL,
+          created_at DATETIME NOT NULL,
+          updated_at DATETIME NOT NULL
+        );
+        CREATE TABLE import_items (
+          id INTEGER PRIMARY KEY,
+          status TEXT NOT NULL
+        );
+        INSERT INTO app_settings(key, value, updated_at)
+        VALUES ('schema', '{"version": 4}', '2026-07-29T00:00:00+00:00');
+        INSERT INTO collections(
+          id, key, title, cover_url, sort_order, created_at, updated_at
+        ) VALUES (
+          7, 'manual-import', '手动导入', NULL, -1,
+          '2026-07-29T00:00:00+00:00', '2026-07-29T00:00:00+00:00'
+        );
+        INSERT INTO import_items(id, status) VALUES (11, 'ready');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    migrate_to_v5(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(collections)")
+        }
+        version = json.loads(
+            connection.execute(
+                "SELECT value FROM app_settings WHERE key='schema'"
+            ).fetchone()[0]
+        )["version"]
+        assert "summary_prompt" in columns
+        assert version == 5
+        assert connection.execute(
+            "SELECT status FROM import_items WHERE id=11"
+        ).fetchone()[0] == "ready"
     finally:
         connection.close()

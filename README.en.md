@@ -23,6 +23,9 @@ Link resolution and AI processing require network access. The current release
 supports Windows only and is designed for one trusted user on one local
 machine.
 
+> Latest release: **v0.4.0** (2026-07-31) · [Read the changelog](CHANGELOG.md) ·
+> [View the GitHub Release](https://github.com/fyfsxkh/TokBrain/releases/tag/v0.4.0)
+
 ## Feature overview
 
 | Capability | What it does |
@@ -48,8 +51,8 @@ Cookie, secret, or user data is included.
 ![TokBrain link preview](docs/screenshots/import-workspace.png)
 
 The import page makes batch limits, daily usage, preview status, and the media
-policy visible. A work enters processing only after the user selects and
-confirms it.
+policy visible. A work enters Pending only after the user selects and confirms
+it, and processing starts only after the user explicitly clicks Ingest.
 
 <table>
   <tr>
@@ -71,15 +74,17 @@ confirms it.
 ```mermaid
 flowchart LR
     A["Manually paste a public-work link"] --> B["Low-frequency F2 preview<br/>metadata and permission only"]
-    B --> C["User selects and confirms"]
-    C --> D["Resolve again and refresh permission"]
-    D -->|Download explicitly allowed| E["Full-media processing<br/>keyframes / OCR / ASR"]
-    D -->|Denied or unclear| F["No full-video download<br/>subtitles / audio / metadata"]
-    E --> G["Summarize, chunk, and embed"]
-    F --> G
-    G --> H["Local knowledge base"]
-    H --> I["Grounded RAG"]
-    H --> J["Obsidian export"]
+    B --> C["Choose a collection per work<br/>default: Manual Import"]
+    C --> D["Confirm into Pending"]
+    D --> E["User starts ingestion"]
+    E --> F["Resolve again and refresh permission"]
+    F -->|Download explicitly allowed| G["Full-media processing<br/>keyframes / OCR / ASR"]
+    F -->|Denied or unclear| H["No full-video download<br/>subtitles / audio / metadata"]
+    G --> I["Summarize, chunk, and embed"]
+    H --> I
+    I --> J["Local knowledge base"]
+    J --> K["Grounded RAG"]
+    J --> L["Obsidian export"]
 ```
 
 | Input state | TokBrain behavior | Media retention |
@@ -89,9 +94,10 @@ flowchart LR
 | User-supplied local assets | Validates magic bytes, image/video structure, and size before the full local-media path | Retains source assets until the corresponding work is permanently deleted |
 
 A successful preview only adds a work to the confirmation area. It does not
-download media, call a model, or make the work searchable. TokBrain resolves
-the work again before ingestion; if permission changes, the processing scope
-is narrowed.
+download media, call a model, or make the work searchable. Choose an existing
+collection for each work (Manual Import by default), then confirm it into
+Pending. TokBrain resolves the work again only after you explicitly start
+ingestion; if permission changes, the processing scope is narrowed.
 
 > “Author allows download” is only a technical routing signal. It is not
 > permission to republish, redistribute, commercialize, train a public model
@@ -145,8 +151,18 @@ When ready, TokBrain opens <http://127.0.0.1:3000>. The backend is fixed to
    to access and process.
 3. Wait for the bounded preview and check the permission and processing policy
    shown for each result.
-4. Select and confirm the desired results. Preview itself consumes no AI quota.
-5. Review summaries in the Library or ask questions over indexed works in Chat.
+4. Choose a collection for each result, select the desired results, and confirm
+   them into Pending. Preview and confirmation consume no AI quota.
+5. After confirmation, the Import button changes to “Ingest (N)” for the exact
+   confirmed works. You can use it immediately or ingest from Library → Pending.
+6. Review summaries in the Library or ask questions over indexed works in Chat.
+   Select a collection in the Library to give it a dedicated summary prompt;
+   collections without one use the global prompt from Settings.
+
+Completed preview results remain visible when switching between pages and can
+be deleted individually. Works in any Library state—including fully summarized
+works—can be permanently deleted together with their summaries, search index,
+and local assets.
 
 See the Chinese [user guide](操作说明书.md) for error codes, local supplements,
 backup, and recovery details.
@@ -205,10 +221,11 @@ Remote full videos are temporary processing inputs, not a permanent download
 library. Permanently deleting a work also removes associated local assets.
 Back up the database and asset directories from the same point in time.
 
-On the first v4 start, TokBrain creates a SQLite backup before transactionally
-migrating historical works, summaries, chunks, keyframes, usage, and local
-collections. Restarting the app never resumes abandoned platform access or
-processing jobs automatically.
+On first startup with database **schema v5**, TokBrain creates a timestamped
+SQLite backup before migrating historical works, summaries, chunks, keyframes,
+usage, and local collections. Upgrading from schema v4 preserves existing
+preview and ingestion queues. Restarting the app never resumes abandoned
+platform access or processing jobs automatically.
 
 ## Development and verification
 
@@ -237,6 +254,8 @@ Douyin endpoints. Before a release, run:
 
 Project documents:
 
+- [Changelog / 更新日志](CHANGELOG.md)
+- [Latest GitHub Release](https://github.com/fyfsxkh/TokBrain/releases/tag/v0.4.0)
 - [Third-party notices / 第三方软件声明](THIRD_PARTY_NOTICES.md)
 - [Security policy / 安全策略](SECURITY.md)
 - [Contributing / 贡献指南](CONTRIBUTING.md)

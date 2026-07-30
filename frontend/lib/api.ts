@@ -155,6 +155,8 @@ class LocalApiClient {
     job_id: string;
     accepted_count: number;
     rejected_count: number;
+    queued_count: number;
+    duplicate_count: number;
   }> {
     return this.request("/api/import-batches", {
       method: "POST",
@@ -174,11 +176,20 @@ class LocalApiClient {
 
   confirmImportBatch(
     id: string,
-    itemIds: number[],
-  ): Promise<Contract.Job> {
+    items: Array<{ item_id: number; collection_id?: number }>,
+  ): Promise<Contract.ImportConfirmation> {
+    const assigned = items.filter(
+      (item): item is { item_id: number; collection_id: number } =>
+        item.collection_id !== undefined,
+    );
     return this.request(`/api/import-batches/${encodeURIComponent(id)}/confirm`, {
       method: "POST",
-      body: JSON.stringify({ item_ids: itemIds }),
+      body: JSON.stringify({
+        item_ids: items
+          .filter((item) => item.collection_id === undefined)
+          .map((item) => item.item_id),
+        items: assigned,
+      }),
     });
   }
 
@@ -192,6 +203,10 @@ class LocalApiClient {
       method: "POST",
       body,
     });
+  }
+
+  removeImportItem(itemId: number): Promise<Contract.ImportBatch> {
+    return this.request(`/api/import-items/${itemId}`, { method: "DELETE" });
   }
 
   jobs(): Promise<Contract.Job[]> {
@@ -219,6 +234,16 @@ class LocalApiClient {
     return this.request("/api/library/collections", {
       method: "POST",
       body: JSON.stringify({ title }),
+    });
+  }
+
+  updateCollectionSummaryPrompt(
+    collectionId: number,
+    summaryPrompt: string | null,
+  ): Promise<Contract.Collection> {
+    return this.request(`/api/library/collections/${collectionId}`, {
+      method: "PUT",
+      body: JSON.stringify({ summary_prompt: summaryPrompt }),
     });
   }
 
@@ -260,6 +285,13 @@ class LocalApiClient {
 
   retry(id: number): Promise<unknown> {
     return this.request(`/api/library/works/${id}/retry`, { method: "POST" });
+  }
+
+  ingest(workIds: number[]): Promise<Contract.Job> {
+    return this.request("/api/library/ingest/jobs", {
+      method: "POST",
+      body: JSON.stringify({ work_ids: workIds }),
+    });
   }
 
   retryBatch(body: {

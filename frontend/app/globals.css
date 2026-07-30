@@ -91,6 +91,7 @@ button,input,textarea,select { font:inherit; }
 .summary-hero blockquote { margin:24px 0; padding:14px 18px; border-left:3px solid var(--cyan); background:#101619; font-size:18px; line-height:1.7; }
 .summary-actions { display:flex; flex-wrap:wrap; gap:16px; color:var(--muted); font-size:13px; }
 .summary-actions a { color:var(--cyan); text-decoration:none; }
+.summary-actions button { padding:0; border:0; background:transparent; }
 .summary-tags { display:flex; flex-wrap:wrap; gap:8px; margin:18px 0; }.summary-tags span { padding:5px 9px; border:1px solid var(--line); border-radius:999px; color:var(--cyan); }
 .summary-content { display:grid; gap:16px; }.summary-section { padding:26px; border:1px solid var(--line); background:var(--panel); }.summary-section>h2 { margin:0 0 18px; font-size:22px; }
 .section-image { display:block; max-width:100%; max-height:720px; margin:24px auto 0; object-fit:contain; background:#fff; }
@@ -134,6 +135,9 @@ button,input,textarea,select { font:inherit; }
 .result-body h3 { margin:7px 0 4px; overflow-wrap:anywhere; font-size:14px; line-height:1.5; }
 .result-body p { margin:0; color:var(--muted); font-size:12px; line-height:1.55; overflow-wrap:anywhere; }
 .result-body .result-error { margin-top:6px; color:var(--danger-text); }
+.result-collection { display:flex; align-items:center; gap:10px; margin-top:10px; color:var(--muted); font-size:12px; }
+.result-collection span { flex:none; }
+.result-collection select { width:min(360px,100%); min-width:0; padding:8px 10px; border:1px solid var(--line); border-radius:var(--radius-small,8px); background:var(--input-bg,#0f1316); color:var(--text); }
 .upload-action { color:var(--cyan); cursor:pointer; font-size:12px; }
 .upload-action:hover { text-decoration:underline; }
 .upload-action input { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; }
@@ -184,6 +188,13 @@ button,input,textarea,select { font:inherit; }
 .collection-create { display:flex; align-items:center; gap:8px; }
 .collection-create input { width:min(260px,40vw); padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius-small,8px); background:var(--input-bg,#0f1316); color:var(--text); outline:0; }
 .collection-create input:focus { border-color:var(--cyan); }
+.collection-prompt-editor { display:grid; gap:14px; }
+.collection-prompt-editor h3 { margin:6px 0 0; font-size:20px; }
+.collection-prompt-editor textarea { width:100%; min-height:280px; padding:14px; resize:vertical; border:1px solid var(--line); border-radius:var(--radius-small,8px); background:var(--input-bg,#0f1316); color:var(--text); opacity:1; -webkit-text-fill-color:var(--text); font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; outline:0; }
+.collection-prompt-editor textarea::placeholder { color:var(--muted); opacity:.72; -webkit-text-fill-color:var(--muted); }
+.collection-prompt-editor textarea:focus { border-color:var(--cyan); }
+.collection-prompt-foot { display:flex; align-items:center; justify-content:space-between; gap:18px; }
+.collection-prompt-foot>small { max-width:720px; color:var(--muted); line-height:1.6; }
 .selection-actions { display:flex; align-items:center; gap:10px; }
 .selection-actions select { min-width:190px; padding:10px 12px; border:1px solid var(--line); border-radius:var(--radius-small,8px); background:var(--input-bg,#0f1316); color:var(--text); }
 .model-readonly { padding:11px 12px; border:1px solid var(--line); background:var(--input-bg,#0f1316); }
@@ -224,6 +235,9 @@ button,input,textarea,select { font:inherit; }
   .collection-head-actions { width:100%; justify-items:stretch; }
   .collection-create { align-items:stretch; flex-direction:column; }
   .collection-create input { width:100%; }
+  .collection-prompt-foot { align-items:stretch; flex-direction:column; }
+  .result-collection { align-items:stretch; flex-direction:column; }
+  .result-collection select { width:100%; }
   .selection-actions { align-items:stretch; flex-direction:column; }
   .selection-actions select { width:100%; }
   .billing-credentials-status>div { align-items:stretch; flex-direction:column; }

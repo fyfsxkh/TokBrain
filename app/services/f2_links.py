@@ -70,7 +70,7 @@ ERROR_MESSAGES = {
     "work_unavailable": "作品可能不存在、已删除、私密或权限不足",
     "media_missing": "已读取作品元数据，但链接解析服务没有返回可处理的媒体",
     "media_expired": "作品媒体地址已经失效",
-    "duplicate_input": "该链接在当前批次中重复",
+    "duplicate_input": "该作品已在预检结果中，无需重复添加",
     "already_imported": "该作品已存在于本地知识库",
     "local_file_required": "请上传本地视频或图片后继续",
     "cancelled_by_user": "用户中断前该链接尚未开始",
