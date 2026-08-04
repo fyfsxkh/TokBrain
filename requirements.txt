@@ -3,7 +3,7 @@ fastapi==0.140.7
 starlette==1.3.1
 uvicorn==0.30.6
 sqlalchemy==2.0.35
-aiosqlite==0.20.0
+aiosqlite==0.22.1
 pydantic==2.9.2
 pydantic-settings==2.5.2
 httpx==0.27.2
