@@ -405,8 +405,16 @@ def _normalize_detail(row: dict[str, Any]) -> PublicWork:
     permission = str(row.get("_download_permission") or "unknown")
     if permission not in {"allowed", "denied", "unknown"}:
         permission = "unknown"
-    processing_mode = "full_media" if permission == "allowed" else "subtitle_or_audio"
-    images = all_images if permission == "allowed" else []
+    is_image_post = bool(all_images or aweme_type in {2, 68, 150})
+    # Public image posts are processed independently of the video's download
+    # permission flag. That flag is still retained for provenance/diagnostics,
+    # but it is not a reliable image-post media policy.
+    processing_mode = (
+        "full_images"
+        if is_image_post
+        else ("full_media" if permission == "allowed" else "subtitle_or_audio")
+    )
+    images = all_images[:12] if is_image_post else []
     media_urls = all_media_urls if permission == "allowed" else []
     covers = [
         url
@@ -423,7 +431,7 @@ def _normalize_detail(row: dict[str, Any]) -> PublicWork:
         or None
     )
     author_id = _first(row.get("sec_user_id"), _first(row.get("uid")))
-    kind = "image" if all_images or aweme_type in {2, 68, 150} else "video"
+    kind = "image" if is_image_post else "video"
     canonical_url = (
         f"https://www.douyin.com/{'note' if kind == 'image' else 'video'}/{work_id}"
     )
@@ -459,6 +467,7 @@ def _normalize_detail(row: dict[str, Any]) -> PublicWork:
                 "audio_urls": audio_urls,
                 "subtitle_urls": subtitle_urls,
                 "subtitle_texts": subtitle_texts,
+                "expected_image_count": len(images),
             },
         },
     )

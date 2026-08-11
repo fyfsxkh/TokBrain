@@ -4,7 +4,7 @@ TokBrain 的主题是纯前端、设备本地的外观扩展。主题不会写�
 
 ## 组成
 
-- `registry.ts`：公开的 `ThemeDefinition`、主题文案、预览色板与资源声明。
+- `registry.ts`：公开的 `ThemeDefinition`、共享文案与预览色板。
 - `ThemeProvider.tsx`：即时切换、`localStorage` 持久化和多标签同步。
 - `styles/<theme-id>.css`：必须使用 `:root[data-theme="<theme-id>"]` 限定作用域。
 - `public/themes/<theme-id>.webp`：可选的本地环境背景，不得包含文字或烘焙后的界面。
@@ -16,11 +16,11 @@ TokBrain 的主题是纯前端、设备本地的外观扩展。主题不会写�
 1. 在 `THEME_IDS` 增加稳定、全小写的主题 ID。
 2. 在 `THEMES` 注册一份完整 `ThemeDefinition`：
    - `preview` 用于设置页的迷你预览。
-   - `copy` 只改变展示隐喻，不得改变业务含义。
-   - `assets.background` 留空时会按 `/themes/<theme-id>.webp` 推导。
+   - `tone` 用于浏览器配色方案与初始主题引导。
+   - 业务文案由注册表统一共享，主题不得改变业务含义。
 3. 复制 `styles/_template.css` 为 `styles/<theme-id>.css`，所有规则必须带主题作用域。
 4. 在 `app/layout.tsx` 直接导入新样式。不要用 CSS `@import` 聚合主题；Next/Turbopack 在部分 Windows 中文路径下无法正确解析这类相对导入。
-5. 如需背景图，使用无文字、无 UI、中央低对比的横向 WebP，建议控制在 250 KB 内。
+5. 如需背景图，在主题 CSS 中引用对应的 `/themes/<theme-id>.webp`；使用无文字、无 UI、中央低对比的横向 WebP，建议控制在 250 KB 内。
 6. 运行 `npm test`、`npm run lint` 和 `npm run build`。
 
 ## 设计约束

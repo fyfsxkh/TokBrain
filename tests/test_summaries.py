@@ -12,10 +12,8 @@ from app.services.summaries import (
     summary_markdown,
     source_without_generated_notes,
 )
-from app.services.providers import (
-    DETAILED_SUMMARY_SYSTEM_PROMPT,
-    SUMMARY_MAX_OUTPUT_TOKENS,
-)
+from app.services.prompts import DEFAULT_SUMMARY_PROMPT
+from app.services.providers import SUMMARY_MAX_OUTPUT_TOKENS
 
 
 def test_summary_markdown_omits_missing_optional_sections():
@@ -33,10 +31,10 @@ def test_summary_markdown_omits_missing_optional_sections():
 
 def test_detailed_summary_contract_and_regeneration_source():
     assert PROMPT_VERSION == "summary-v3-memory-chain"
-    assert "你是一位知识架构师" in DETAILED_SUMMARY_SYSTEM_PROMPT
-    assert "完整记忆链" in DETAILED_SUMMARY_SYSTEM_PROMPT
-    assert "重点深析与关联锚点" in DETAILED_SUMMARY_SYSTEM_PROMPT
-    assert "为什么重要" in DETAILED_SUMMARY_SYSTEM_PROMPT
+    assert "你是一位知识架构师" in DEFAULT_SUMMARY_PROMPT
+    assert "完整记忆链" in DEFAULT_SUMMARY_PROMPT
+    assert "重点深析与关联锚点" in DEFAULT_SUMMARY_PROMPT
+    assert "为什么重要" in DEFAULT_SUMMARY_PROMPT
     assert SUMMARY_MAX_OUTPUT_TOKENS == 16_384
     assert "作品精华总结" not in summary_markdown({})
     assert (

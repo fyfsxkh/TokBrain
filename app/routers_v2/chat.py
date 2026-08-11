@@ -7,6 +7,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -59,6 +60,47 @@ def _build_context(payload: ChatRequest, sources: list[dict]) -> str:
     )
 
 
+async def _record_chat_usage(
+    session: AsyncSession, usage: ProviderUsage, *, recovered: bool = False
+) -> None:
+    await record_usage(
+        session,
+        model=usage.model,
+        metric=usage.metric,
+        quantity=usage.quantity,
+        unit=usage.unit,
+        estimated_cost_cny=usage.cost_cny,
+        metadata={
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            **({"recovered_after_commit_failure": True} if recovered else {}),
+        },
+        price_version=PRICE_VERSION,
+    )
+
+
+async def _settle_chat_failure(
+    session: AsyncSession, reservation, usage: ProviderUsage | None
+) -> None:
+    """Make a failed response reusable without treating a completed model call as free."""
+
+    await session.rollback()
+    try:
+        if usage is None:
+            await release(session, reservation)
+        else:
+            await _record_chat_usage(session, usage, recovered=True)
+            await consume(
+                session,
+                reservation,
+                actual_llm_tokens=usage.input_tokens + usage.output_tokens,
+            )
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        logger.exception("回答失败后的用量结算未能持久化")
+
+
 async def _retrieve(payload: ChatRequest, session: AsyncSession) -> list[dict]:
     # Concrete short queries must stand on their own. Mixing several previous
     # questions into the embedding can make an unrelated prior topic dominate.
@@ -107,23 +149,12 @@ async def ask(payload: ChatRequest, session: AsyncSession = Depends(get_db)):
         await session.commit()
     except BudgetExceeded as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
+    usage: ProviderUsage | None = None
     try:
         answer, usage = await DashScopeProvider(api_key).chat(
             payload.question, context, model=model
         )
-        await record_usage(
-            session,
-            model=usage.model,
-            metric=usage.metric,
-            quantity=usage.quantity,
-            unit=usage.unit,
-            estimated_cost_cny=usage.cost_cny,
-            metadata={
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-            },
-            price_version=PRICE_VERSION,
-        )
+        await _record_chat_usage(session, usage)
         await consume(
             session,
             reservation,
@@ -132,8 +163,7 @@ async def ask(payload: ChatRequest, session: AsyncSession = Depends(get_db)):
         await session.commit()
         return ChatAnswer(answer=answer, sources=_source_views(sources))
     except Exception:
-        await release(session, reservation)
-        await session.commit()
+        await _settle_chat_failure(session, reservation, usage)
         raise
 
 
@@ -152,30 +182,31 @@ async def ask_stream(payload: ChatRequest, session: AsyncSession = Depends(get_d
     async def generate():
         started = time.perf_counter()
         reservation = None
+        usage: ProviderUsage | None = None
         try:
             yield _event("stage", stage="retrieving", message="正在查找相关作品…")
             retrieval_started = time.perf_counter()
             sources = await _retrieve(payload, session)
             retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000)
             if not sources:
+                await session.commit()
                 yield _event("delta", text="知识库中还没有可用于回答的内容。")
                 yield _event("sources", sources=[])
                 yield _event(
                     "done", timing_ms={"retrieval": retrieval_ms, "total": retrieval_ms}
                 )
-                await session.commit()
                 return
             yield _event("sources", sources=_source_views(sources))
             yield _event("stage", stage="generating", message="正在组织回答…")
             context = _build_context(payload, sources)
             runtime = await get_runtime_settings(session)
             model = _model_for(payload.mode, runtime)
-            reservation = await reserve(
+            pending_reservation = await reserve(
                 session, works=0, llm_tokens=max(4000, len(context) // 2 + 2000)
             )
             await session.commit()
+            reservation = pending_reservation
             first_token_ms = None
-            usage: ProviderUsage | None = None
             provider = DashScopeProvider(api_key)
             async for kind, value in provider.chat_stream(
                 payload.question, context, model=model
@@ -187,26 +218,14 @@ async def ask_stream(payload: ChatRequest, session: AsyncSession = Depends(get_d
                 else:
                     usage = value if isinstance(value, ProviderUsage) else None
             usage = usage or ProviderUsage(model, 0, 0, 0)
-            await record_usage(
-                session,
-                model=usage.model,
-                metric=usage.metric,
-                quantity=usage.quantity,
-                unit=usage.unit,
-                estimated_cost_cny=usage.cost_cny,
-                metadata={
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                },
-                price_version=PRICE_VERSION,
-            )
+            await _record_chat_usage(session, usage)
             await consume(
                 session,
                 reservation,
                 actual_llm_tokens=usage.input_tokens + usage.output_tokens,
             )
-            reservation = None
             await session.commit()
+            reservation = None
             yield _event(
                 "done",
                 timing_ms={
@@ -217,14 +236,13 @@ async def ask_stream(payload: ChatRequest, session: AsyncSession = Depends(get_d
             )
         except asyncio.CancelledError:
             if reservation:
-                await release(session, reservation)
-                await session.commit()
+                await _settle_chat_failure(session, reservation, usage)
             raise
         except Exception as exc:
             if reservation:
-                await release(session, reservation)
-                await session.commit()
-            yield _event("error", message=str(exc)[:500])
+                await _settle_chat_failure(session, reservation, usage)
+            logger.exception("流式回答生成失败: {}", exc)
+            yield _event("error", message="回答生成失败，请稍后重试")
 
     return StreamingResponse(
         generate(),

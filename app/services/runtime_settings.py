@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal, TypedDict, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,24 @@ from app.services.prompts import DEFAULT_SUMMARY_PROMPT
 
 
 RUNTIME_KEY = "runtime"
+AnswerFormat = Literal["rich", "markdown", "plain"]
+
+
+class RuntimeSettings(TypedDict):
+    daily_media_minutes_limit: float
+    daily_llm_token_limit: int
+    monthly_warning_cny: float
+    scene_threshold: float
+    max_scene_candidates: int
+    max_keyframes: int
+    min_keyframe_gap_seconds: float
+    default_answer_format: AnswerFormat
+    summary_prompt: str
+    processing_model: str
+    chat_fast_model: str
+    chat_deep_model: str
+
+
 MUTABLE_FIELDS = {
     "daily_media_minutes_limit",
     "daily_llm_token_limit",
@@ -50,6 +68,7 @@ CHAT_MODEL_OPTIONS = (
 )
 PROCESSING_MODELS = frozenset(PROCESSING_MODEL_OPTIONS)
 CHAT_MODELS = frozenset(CHAT_MODEL_OPTIONS)
+ANSWER_FORMATS = frozenset({"rich", "markdown", "plain"})
 NUMERIC_RULES: dict[str, tuple[float, float | None, bool]] = {
     "daily_media_minutes_limit": (1, 100000, False),
     "daily_llm_token_limit": (1000, None, True),
@@ -61,7 +80,7 @@ NUMERIC_RULES: dict[str, tuple[float, float | None, bool]] = {
 }
 
 
-def defaults() -> dict[str, Any]:
+def defaults() -> RuntimeSettings:
     return {
         "daily_media_minutes_limit": settings.daily_media_minutes_limit,
         "daily_llm_token_limit": settings.daily_llm_token_limit,
@@ -95,15 +114,19 @@ def _normalize_numeric_settings(result: dict[str, Any]) -> None:
         result[field] = int(value) if integer else value
 
 
-async def get_runtime_settings(session: AsyncSession) -> dict[str, Any]:
-    result = defaults()
-    record = await session.get(AppSetting, RUNTIME_KEY)
-    if record and isinstance(record.value, dict):
-        result.update({k: v for k, v in record.value.items() if k in MUTABLE_FIELDS})
+def _normalize_settings(result: dict[str, Any]) -> RuntimeSettings:
+    """Return a complete, response-safe settings object from persisted input."""
+
     _normalize_numeric_settings(result)
+    fallback = defaults()
     prompt = str(result.get("summary_prompt") or "").strip()
     result["summary_prompt"] = prompt[:12_000] or DEFAULT_SUMMARY_PROMPT
-    fallback = defaults()
+    answer_format = str(result.get("default_answer_format") or "").strip()
+    result["default_answer_format"] = (
+        answer_format
+        if answer_format in ANSWER_FORMATS
+        else fallback["default_answer_format"]
+    )
     allowed_by_field = {
         "processing_model": PROCESSING_MODELS,
         "chat_fast_model": CHAT_MODELS,
@@ -112,28 +135,25 @@ async def get_runtime_settings(session: AsyncSession) -> dict[str, Any]:
     for field, allowed in allowed_by_field.items():
         model = str(result.get(field) or "").strip()
         result[field] = model if model in allowed else str(fallback[field])
-    return result
+    return cast(RuntimeSettings, result)
+
+
+async def get_runtime_settings(session: AsyncSession) -> RuntimeSettings:
+    result = defaults()
+    record = await session.get(AppSetting, RUNTIME_KEY)
+    if record and isinstance(record.value, dict):
+        result.update({k: v for k, v in record.value.items() if k in MUTABLE_FIELDS})
+    return _normalize_settings(result)
 
 
 async def update_runtime_settings(
     session: AsyncSession, values: dict[str, Any]
-) -> dict[str, Any]:
+) -> RuntimeSettings:
     current = await get_runtime_settings(session)
     current.update(
         {k: v for k, v in values.items() if k in MUTABLE_FIELDS and v is not None}
     )
-    _normalize_numeric_settings(current)
-    prompt = str(current.get("summary_prompt") or "").strip()
-    current["summary_prompt"] = prompt[:12_000] or DEFAULT_SUMMARY_PROMPT
-    fallback = defaults()
-    allowed_by_field = {
-        "processing_model": PROCESSING_MODELS,
-        "chat_fast_model": CHAT_MODELS,
-        "chat_deep_model": CHAT_MODELS,
-    }
-    for field, allowed in allowed_by_field.items():
-        model = str(current.get(field) or "").strip()
-        current[field] = model if model in allowed else str(fallback[field])
+    current = _normalize_settings(current)
     record = await session.get(AppSetting, RUNTIME_KEY)
     stored = {k: current[k] for k in MUTABLE_FIELDS if k in current}
     if record:

@@ -48,6 +48,11 @@ class DatabaseRuntime:
             await connection.run_sync(Base.metadata.create_all)
         await asyncio.to_thread(finalize_database)
 
+    async def dispose(self) -> None:
+        """Close pooled SQLite connections during application shutdown."""
+
+        await self.engine.dispose()
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
         session = self.session_factory()
@@ -71,7 +76,3 @@ async def init_db() -> None:
 async def get_db() -> AsyncIterator[AsyncSession]:
     async with database.session() as session:
         yield session
-
-
-def get_db_context():
-    return database.session()

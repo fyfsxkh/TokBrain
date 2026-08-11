@@ -27,13 +27,15 @@ def test_unlink_retries_a_windows_sharing_violation(monkeypatch, tmp_path):
 def test_cleanup_only_removes_regenerated_media(tmp_path):
     stale_wav = tmp_path / "old.asr.wav"
     stale_opus = tmp_path / "old.asr.opus"
+    stale_restricted_audio = tmp_path / "old.restricted-audio"
     stale_video = tmp_path / "old.mp4"
     keep = tmp_path / "keep.txt"
-    for path in (stale_wav, stale_opus, stale_video, keep):
+    for path in (stale_wav, stale_opus, stale_restricted_audio, stale_video, keep):
         path.write_bytes(b"temporary")
 
-    assert temp_files.cleanup_stale_temp_media(tmp_path) == 3
+    assert temp_files.cleanup_stale_temp_media(tmp_path) == 4
     assert not stale_wav.exists()
     assert not stale_opus.exists()
+    assert not stale_restricted_audio.exists()
     assert not stale_video.exists()
     assert keep.exists()

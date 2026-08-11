@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.models import Base, Collection, CollectionMembership, KnowledgeChunk, Work
@@ -30,6 +31,20 @@ async def session():
                 library_state="pending",
                 processing_state="processed",
             ),
+            Work(
+                platform_work_id="work-3",
+                title="只有生成笔记",
+                library_state="in_library",
+                processing_state="processed",
+                evidence_state="sufficient",
+            ),
+            Work(
+                platform_work_id="work-4",
+                title="证据已判不足",
+                library_state="in_library",
+                processing_state="processed",
+                evidence_state="insufficient",
+            ),
         ]
         value.add_all(works)
         await value.flush()
@@ -53,6 +68,18 @@ async def session():
                     chunk_index=0,
                     source_kind="metadata",
                     text="手冲咖啡隐藏候选",
+                ),
+                KnowledgeChunk(
+                    work_id=works[2].id,
+                    chunk_index=0,
+                    source_kind="notes",
+                    text="这是模型扩写出来的虚构结论",
+                ),
+                KnowledgeChunk(
+                    work_id=works[3].id,
+                    chunk_index=0,
+                    source_kind="transcript",
+                    text="低于有效门槛的残缺语句",
                 ),
             ]
         )
@@ -79,11 +106,54 @@ async def test_search_excludes_pending_works_even_when_text_matches(session):
     assert results == []
 
 
+async def test_search_excludes_generated_notes_without_original_evidence(session):
+    assert await search(session, "虚构结论") == []
+
+
+async def test_search_excludes_work_marked_as_insufficient(session):
+    assert await search(session, "残缺语句") == []
+
+
 async def test_search_groups_multiple_chunks_from_the_same_work(session):
     results = await search(session, "咖啡研磨")
     assert len(results) == 1
     assert "九十二度" in results[0]["text"]
     assert "细砂糖" in results[0]["text"]
+
+
+async def test_embedding_failure_falls_back_to_lexical_search(session, monkeypatch):
+    chunk = await session.scalar(
+        select(KnowledgeChunk).where(KnowledgeChunk.source_kind == "transcript")
+    )
+    chunk.embedding = [1.0, 0.0]
+    await session.commit()
+    released = False
+
+    class FailingProvider:
+        def __init__(self, _key):
+            pass
+
+        async def embed(self, _texts):
+            raise RuntimeError("temporary provider failure")
+
+    async def fake_secret(*_args):
+        return "test-key"
+
+    async def fake_reserve(*_args, **_kwargs):
+        return object()
+
+    async def fake_release(*_args, **_kwargs):
+        nonlocal released
+        released = True
+
+    monkeypatch.setattr(knowledge, "DashScopeProvider", FailingProvider)
+    monkeypatch.setattr(knowledge, "get_secret", fake_secret)
+    monkeypatch.setattr(knowledge, "reserve", fake_reserve)
+    monkeypatch.setattr(knowledge, "release", fake_release)
+
+    results = await search(session, "咖啡热水")
+    assert released is True
+    assert results[0]["title"] == "咖啡教程"
 
 
 async def test_semantic_search_keeps_exact_chinese_phrase_above_unrelated_vector_hit(
@@ -136,14 +206,14 @@ async def test_semantic_search_keeps_exact_chinese_phrase_above_unrelated_vector
                 KnowledgeChunk(
                     work_id=math.id,
                     chunk_index=0,
-                    source_kind="notes",
+                    source_kind="transcript",
                     text="区间减半公式可以缩短定积分的计算区间。",
                     embedding=[0.30, 0.953939],
                 ),
                 KnowledgeChunk(
                     work_id=psychology.id,
                     chunk_index=0,
-                    source_kind="notes",
+                    source_kind="transcript",
                     text="沟通中需要关注情绪和关系。",
                     embedding=[1.0, 0.0],
                 ),

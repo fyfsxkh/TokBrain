@@ -7,46 +7,83 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend:
+  quality:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install dependencies
-        run: |
-          python -m pip install -r requirements.txt
-          python -m pip install --no-deps --target .vendor -r requirements-f2.txt
-      - name: Audit Python dependencies
-        run: |
-          python -m pip install pip-audit
-          python -m pip_audit -r requirements.txt --progress-spinner off
-          python -m pip_audit --disable-pip --no-deps --vulnerability-service osv -r requirements-f2.txt --progress-spinner off
-      - name: Run backend tests
-        run: python -m pytest -q
+          cache-dependency-path: |
+            requirements.txt
+            requirements-billing.txt
+            requirements-dev.txt
+            requirements-f2.txt
 
-  frontend:
-    runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: Audit production dependencies
+
+      - name: Verify required media toolchain
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      - name: Install through the supported Windows setup path
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+          .\scripts\setup.ps1 -WithDev
+
+      - name: Verify Python dependency and F2 isolation contracts
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe -m pip check
+          .\.venv\Scripts\python.exe -c "from pathlib import Path; from app.services.f2_links import F2_VENDOR_DIR, ensure_f2_runtime; ensure_f2_runtime(); import f2; origin=Path(f2.__file__).resolve(); raise SystemExit(0 if F2_VENDOR_DIR.resolve() in origin.parents else 1)"
+
+      - name: Compile Python sources
+        run: .\.venv\Scripts\python.exe -m compileall -q app scripts tests
+
+      - name: Run backend tests with coverage floor
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe -m coverage erase
+          .\.venv\Scripts\python.exe -m coverage run --branch --source=app -m pytest -q -p no:cacheprovider
+          .\.venv\Scripts\python.exe -m coverage report --show-missing --fail-under=50
+
+      - name: Run frontend tests, lint, and typecheck
+        working-directory: frontend
+        run: |
+          npm test
+          npm run lint
+          npm run typecheck
+
+      - name: Audit Python dependencies
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe -m pip_audit -r requirements.txt --progress-spinner off
+          .\.venv\Scripts\python.exe -m pip_audit -r requirements-billing.txt --progress-spinner off
+          .\.venv\Scripts\python.exe -m pip_audit -r requirements-dev.txt --progress-spinner off
+          .\.venv\Scripts\python.exe -m pip_audit --disable-pip --no-deps --vulnerability-service osv -r requirements-f2.txt --progress-spinner off
+
+      - name: Audit production npm dependencies
+        working-directory: frontend
         run: npm audit --omit=dev --audit-level=high
-      - name: Test
-        run: npm test
-      - name: Lint
-        run: npm run lint
-      - name: Build
-        run: npm run build
+
+      - name: Verify the committed release candidate
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+          .\scripts\prepublish_check.ps1 -GitExecutable git -RequireClean

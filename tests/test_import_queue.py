@@ -2,11 +2,14 @@ import asyncio
 from datetime import date
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.routers_v2.imports as import_routes
 import app.services.import_queue as imports
+import app.services.jobs as jobs
+from app.main import app
 from app.models import (
     Base,
     Collection,
@@ -33,6 +36,7 @@ from app.services.f2_links import (
     PublicWork,
 )
 from app.schemas import ImportBatchCreate
+from app.services.secrets import SecretUnavailableError
 
 
 async def database_factory(tmp_path):
@@ -129,6 +133,28 @@ def install_test_runtime(monkeypatch, factory):
     )
 
 
+def test_import_batch_create_restores_manual_preview_contract():
+    payload = ImportBatchCreate(text="https://v.douyin.com/a/")
+    assert payload.model_dump() == {"text": "https://v.douyin.com/a/"}
+    with pytest.raises(ValidationError):
+        ImportBatchCreate(text="https://v.douyin.com/a/", start_processing=True)
+    with pytest.raises(ValidationError):
+        ImportBatchCreate(text="https://v.douyin.com/a/", auto_confirm=True)
+    with pytest.raises(ValidationError):
+        ImportBatchCreate(
+            text="https://v.douyin.com/a/",
+            target_collection_id=0,
+        )
+
+    schema = app.openapi()
+    request_schema = schema["paths"]["/api/import-batches"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]
+    assert request_schema["$ref"].endswith("/ImportBatchCreate")
+    properties = schema["components"]["schemas"]["ImportBatchCreate"]["properties"]
+    assert set(properties) == {"text"}
+
+
 async def test_batch_limit_applies_after_duplicate_links_are_removed(tmp_path):
     engine, factory = await database_factory(tmp_path)
     async with factory() as session:
@@ -171,15 +197,19 @@ async def test_duplicate_link_in_same_submission_is_removed_while_unique_links_q
                     "https://v.douyin.com/item-1/",
                     "https://v.douyin.com/item-0/?tracking=ignored",
                 ]
-            )
+            ),
         )
         items = (
-            await session.execute(
-                select(ImportItem)
-                .where(ImportItem.batch_id == batch.id)
-                .order_by(ImportItem.ordinal)
+            (
+                await session.execute(
+                    select(ImportItem)
+                    .where(ImportItem.batch_id == batch.id)
+                    .order_by(ImportItem.ordinal)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         assert rejected == 0
         assert len(queued) == 2
@@ -265,10 +295,14 @@ async def test_later_batch_removes_previewed_link_and_queues_new_link(tmp_path):
             session, f"{existing_url}\n{new_url}"
         )
         second_items = (
-            await session.execute(
-                select(ImportItem).where(ImportItem.batch_id == second_batch.id)
+            (
+                await session.execute(
+                    select(ImportItem).where(ImportItem.batch_id == second_batch.id)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         second_job = await session.get(Job, second_batch.job_id)
 
         assert len(second_queued) == 1
@@ -451,9 +485,7 @@ async def test_confirmed_preview_item_can_be_deleted_without_deleting_work(tmp_p
         assert work is not None
         assert work.library_state == "pending"
         membership = await session.scalar(
-            select(CollectionMembership).where(
-                CollectionMembership.work_id == work_id
-            )
+            select(CollectionMembership).where(CollectionMembership.work_id == work_id)
         )
         assert membership is not None
     await engine.dispose()
@@ -475,7 +507,7 @@ async def test_media_missing_can_wait_for_local_file(tmp_path, monkeypatch):
     await engine.dispose()
 
 
-async def test_download_denied_is_ready_for_metadata_only_ingestion(
+async def test_download_denied_is_ready_for_evidence_check_and_supplement(
     tmp_path, monkeypatch
 ):
     engine, factory = await database_factory(tmp_path)
@@ -498,6 +530,50 @@ async def test_download_denied_is_ready_for_metadata_only_ingestion(
         view = await imports.batch_view(session, batch.id)
         assert view["items"][0]["download_permission"] == "denied"
         assert view["items"][0]["processing_mode"] == "subtitle_or_audio"
+    await engine.dispose()
+
+
+async def test_download_denied_image_post_keeps_public_images_and_is_ready(
+    tmp_path, monkeypatch
+):
+    engine, factory = await database_factory(tmp_path)
+    install_test_runtime(monkeypatch, factory)
+
+    class DeniedImageClient:
+        async def resolve(self, url: str, *, cookie: str = "") -> PublicWork:
+            work_id = url.rstrip("/").split("/")[-1]
+            return PublicWork(
+                platform_work_id=work_id,
+                canonical_url=f"https://www.douyin.com/note/{work_id}",
+                kind="image",
+                title="公开图文",
+                download_permission="denied",
+                processing_mode="full_images",
+                image_urls=[
+                    "https://p1.douyinpic.com/1.webp",
+                    "https://p1.douyinpic.com/2.webp",
+                ],
+                raw_metadata={
+                    "media_policy": {
+                        "download_permission": "denied",
+                        "processing_mode": "full_images",
+                        "expected_image_count": 2,
+                    }
+                },
+            )
+
+    async with factory() as session:
+        _batch, item_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/note/7350000000000000004"
+        )
+    await ImportCoordinator(client=DeniedImageClient())._process_item(item_ids[0], 1)
+
+    async with factory() as session:
+        item = await session.get(ImportItem, item_ids[0])
+        assert item.status == "ready"
+        assert item.kind == "image"
+        assert len(item.image_urls) == 2
+        assert item.raw_metadata["media_policy"]["processing_mode"] == "full_images"
     await engine.dispose()
 
 
@@ -580,6 +656,73 @@ async def test_risk_error_blocks_remaining_batch_and_persists_circuit(
     await engine.dispose()
 
 
+async def test_unreadable_f2_cookie_marks_item_failed_without_leaking_secret_error(
+    tmp_path, monkeypatch
+):
+    engine, factory = await database_factory(tmp_path)
+    install_test_runtime(monkeypatch, factory)
+
+    async def unreadable_cookie(_session, _name):
+        raise SecretUnavailableError("sensitive DPAPI detail")
+
+    monkeypatch.setattr(imports, "get_secret", unreadable_cookie)
+    async with factory() as session:
+        batch, item_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/video/7350000000000000731"
+        )
+
+    client = FakeClient()
+    coordinator = ImportCoordinator(client=client)
+    await coordinator._process_item(item_ids[0], 1)
+
+    async with factory() as session:
+        item = await session.get(ImportItem, item_ids[0])
+        stored_batch = await session.get(ImportBatch, batch.id)
+        job = await session.get(Job, stored_batch.job_id)
+
+        assert item.status == "failed"
+        assert item.worker_id is None
+        assert item.error_code == "f2_cookie_unreadable"
+        assert "sensitive" not in item.error_message
+        assert stored_batch.state == "partial"
+        assert job.state == "partial"
+        assert not client.calls
+        assert await session.scalar(select(func.count(DailyLinkQuota.day))) == 0
+    await engine.dispose()
+
+
+async def test_unexpected_preview_error_marks_failed_and_worker_survives(
+    tmp_path, monkeypatch
+):
+    engine, factory = await database_factory(tmp_path)
+    install_test_runtime(monkeypatch, factory)
+    async with factory() as session:
+        batch, item_ids, _ = await create_import_batch(
+            session, "https://www.douyin.com/video/7350000000000000732"
+        )
+
+    coordinator = ImportCoordinator(
+        client=FakeClient(error=RuntimeError("api_key=top-secret upstream detail"))
+    )
+    await coordinator.queue.put(item_ids[0])
+    await coordinator.queue.put(None)
+    await coordinator._worker(1)
+    await coordinator.queue.join()
+
+    async with factory() as session:
+        item = await session.get(ImportItem, item_ids[0])
+        stored_batch = await session.get(ImportBatch, batch.id)
+
+        assert item.status == "failed"
+        assert item.worker_id is None
+        assert item.error_code == "preview_internal_error"
+        assert "sensitive" not in item.error_message
+        assert stored_batch.state == "partial"
+    assert "top-secret" not in str(coordinator.last_error)
+    assert "[REDACTED]" in str(coordinator.last_error)
+    await engine.dispose()
+
+
 async def test_daily_quota_is_atomic_at_limit_and_resets_by_shanghai_day(
     tmp_path, monkeypatch
 ):
@@ -650,6 +793,22 @@ async def test_startup_always_launches_three_workers_and_never_resumes_access(
     await engine.dispose()
 
 
+async def test_stop_cancels_workers_without_waiting_for_pending_queue():
+    coordinator = ImportCoordinator(client=FakeClient())
+    blocker = asyncio.Event()
+    coordinator.tasks = [
+        asyncio.create_task(blocker.wait(), name=f"blocked-worker-{index}")
+        for index in range(3)
+    ]
+    for item_id in range(5):
+        coordinator.queue.put_nowait(item_id)
+
+    await asyncio.wait_for(coordinator.stop(), timeout=1)
+
+    assert coordinator.tasks == []
+    assert coordinator.queue.empty()
+
+
 async def test_confirmation_creates_pending_work_in_selected_collection_without_ingest_job(
     tmp_path, monkeypatch
 ):
@@ -716,12 +875,8 @@ async def test_confirming_cross_batch_duplicate_is_idempotent(tmp_path):
         await imports._refresh_batch(session, second_batch.id)
         await session.commit()
 
-        first_result = await confirm_import_items(
-            session, first_batch.id, first_ids
-        )
-        second_result = await confirm_import_items(
-            session, second_batch.id, second_ids
-        )
+        first_result = await confirm_import_items(session, first_batch.id, first_ids)
+        second_result = await confirm_import_items(session, second_batch.id, second_ids)
         works = (await session.execute(select(Work))).scalars().all()
         second_item = await session.get(ImportItem, second_ids[0])
 

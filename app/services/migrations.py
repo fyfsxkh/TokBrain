@@ -18,7 +18,7 @@ from app.models import Base
 
 DB_PATH = DATA_DIR / "douyin_rag.db"
 SCHEMA_KEY = "schema"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 9
 REMOVED_SETTING_KEYS = {
     "active_account",
     "adapter_health_state",
@@ -71,7 +71,7 @@ def backup_before_upgrade(path: Path = DB_PATH) -> Path | None:
         return None
     backup_dir = path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    target = backup_dir / f"douyin_rag-pre-v5-{datetime.now():%Y%m%d-%H%M%S}.db"
+    target = backup_dir / f"douyin_rag-pre-v9-{datetime.now():%Y%m%d-%H%M%S}.db"
     source = sqlite3.connect(path)
     destination = sqlite3.connect(target)
     try:
@@ -146,7 +146,11 @@ def _copy_legacy_data(source: sqlite3.Connection, target: sqlite3.Connection) ->
     _insert(
         target,
         "app_settings",
-        {"key": SCHEMA_KEY, "value": json.dumps({"version": SCHEMA_VERSION}), "updated_at": now},
+        {
+            "key": SCHEMA_KEY,
+            "value": json.dumps({"version": SCHEMA_VERSION}),
+            "updated_at": now,
+        },
         replace=True,
     )
 
@@ -276,10 +280,9 @@ def migrate_to_v5(path: Path = DB_PATH) -> None:
         return
     connection = sqlite3.connect(path)
     try:
-        if (
-            _table_exists(connection, "collections")
-            and "summary_prompt" not in _columns(connection, "collections")
-        ):
+        if _table_exists(
+            connection, "collections"
+        ) and "summary_prompt" not in _columns(connection, "collections"):
             connection.execute("ALTER TABLE collections ADD COLUMN summary_prompt TEXT")
         connection.execute(
             """
@@ -289,7 +292,340 @@ def migrate_to_v5(path: Path = DB_PATH) -> None:
             """,
             (
                 SCHEMA_KEY,
-                json.dumps({"version": SCHEMA_VERSION}),
+                json.dumps({"version": 5}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def migrate_to_v6(path: Path = DB_PATH) -> None:
+    """Add explainable keyframe selection metadata without rebuilding the database."""
+
+    if not path.exists() or _schema_version(path) >= 6:
+        return
+    additions = {
+        "candidate_source": "TEXT NOT NULL DEFAULT 'scene'",
+        "selection_score": "FLOAT NOT NULL DEFAULT 0",
+        "selection_reason": "TEXT",
+        "ocr_text": "TEXT",
+        "visual_description": "TEXT",
+    }
+    connection = sqlite3.connect(path)
+    try:
+        if _table_exists(connection, "keyframes"):
+            existing = _columns(connection, "keyframes")
+            for name, definition in additions.items():
+                if name not in existing:
+                    connection.execute(
+                        f'ALTER TABLE keyframes ADD COLUMN "{name}" {definition}'
+                    )
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": 6}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def migrate_to_v7(path: Path = DB_PATH) -> None:
+    """Add local and integration import provenance without rebuilding queue data."""
+
+    if not path.exists() or _schema_version(path) >= 7:
+        return
+    additions = {
+        "works": {
+            "import_source": "TEXT NOT NULL DEFAULT 'link'",
+            "refresh_policy": "TEXT NOT NULL DEFAULT 'f2'",
+        },
+        "import_batches": {
+            "source_type": "TEXT NOT NULL DEFAULT 'link'",
+            "idempotency_key_hash": "VARCHAR(64)",
+            "request_digest": "VARCHAR(64)",
+        },
+        "import_items": {
+            "platform": "TEXT NOT NULL DEFAULT 'douyin'",
+            "client_item_id": "VARCHAR(200)",
+            "target_collection_id": (
+                "INTEGER REFERENCES collections(id) ON DELETE SET NULL"
+            ),
+        },
+    }
+    connection = sqlite3.connect(path)
+    try:
+        for table, table_additions in additions.items():
+            if not _table_exists(connection, table):
+                continue
+            existing = _columns(connection, table)
+            for name, definition in table_additions.items():
+                if name not in existing:
+                    connection.execute(
+                        f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}'
+                    )
+        if _table_exists(connection, "import_batches"):
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_import_batch_idempotency_key_hash
+                ON import_batches(idempotency_key_hash)
+                """
+            )
+        if _table_exists(connection, "import_items"):
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_import_item_batch_client_id
+                ON import_items(batch_id, client_item_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS ix_import_items_target_collection_id
+                ON import_items(target_collection_id)
+                """
+            )
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": 7}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def migrate_to_v8(path: Path = DB_PATH) -> None:
+    """Add durable browser package-upload staging without rebuilding v7 data."""
+
+    if not path.exists() or _schema_version(path) >= 8:
+        return
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS package_import_files (
+              id VARCHAR(36) NOT NULL PRIMARY KEY,
+              batch_id VARCHAR(36) NOT NULL REFERENCES import_batches(id) ON DELETE CASCADE,
+              client_file_id VARCHAR(100) NOT NULL,
+              relative_path TEXT NOT NULL,
+              path_hash VARCHAR(64) NOT NULL,
+              role VARCHAR(20) NOT NULL DEFAULT 'unknown',
+              status VARCHAR(20) NOT NULL DEFAULT 'pending',
+              declared_size INTEGER NOT NULL DEFAULT 0,
+              size_bytes INTEGER NOT NULL DEFAULT 0,
+              sha256 VARCHAR(64),
+              mime_type VARCHAR(100),
+              stored_path TEXT,
+              error_code VARCHAR(50),
+              error_message TEXT,
+              created_at DATETIME NOT NULL,
+              updated_at DATETIME NOT NULL,
+              CONSTRAINT uq_package_file_batch_client_id UNIQUE(batch_id, client_file_id),
+              CONSTRAINT uq_package_file_batch_path UNIQUE(batch_id, path_hash)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_package_import_files_batch_id "
+            "ON package_import_files(batch_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_package_import_files_status "
+            "ON package_import_files(status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_package_import_files_sha256 "
+            "ON package_import_files(sha256)"
+        )
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": 8}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _json_dict(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def migrate_to_v9(path: Path = DB_PATH) -> None:
+    """Add evidence/supplement state and quarantine title-only legacy notes."""
+
+    if not path.exists() or _schema_version(path) >= 9:
+        return
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys=ON")
+        if _table_exists(connection, "works"):
+            additions = {
+                "supplement_state": "TEXT NOT NULL DEFAULT 'none'",
+                "supplement_reason": "VARCHAR(80)",
+                "evidence_state": "TEXT NOT NULL DEFAULT 'unverified'",
+                "track_report": "JSON NOT NULL DEFAULT '{}'",
+            }
+            existing = _columns(connection, "works")
+            for name, definition in additions.items():
+                if name not in existing:
+                    connection.execute(
+                        f'ALTER TABLE works ADD COLUMN "{name}" {definition}'
+                    )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS ix_works_supplement_state "
+                "ON works(supplement_state)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS ix_works_evidence_state "
+                "ON works(evidence_state)"
+            )
+
+            chunk_kinds: dict[int, set[str]] = defaultdict(set)
+            if _table_exists(connection, "knowledge_chunks"):
+                for row in connection.execute(
+                    "SELECT work_id, lower(source_kind) AS source_kind "
+                    "FROM knowledge_chunks"
+                ):
+                    chunk_kinds[int(row["work_id"])].add(str(row["source_kind"] or ""))
+            frame_evidence: set[int] = set()
+            if _table_exists(connection, "keyframes"):
+                keyframe_columns = _columns(connection, "keyframes")
+                if {"ocr_text", "visual_description"} <= keyframe_columns:
+                    frame_evidence = {
+                        int(row[0])
+                        for row in connection.execute(
+                            "SELECT DISTINCT work_id FROM keyframes "
+                            "WHERE length(trim(coalesce(ocr_text, ''))) > 0 "
+                            "OR length(trim(coalesce(visual_description, ''))) > 0"
+                        )
+                    }
+            local_asset_work_ids: set[int] = set()
+            if _table_exists(connection, "work_source_assets"):
+                local_asset_work_ids = {
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT DISTINCT work_id FROM work_source_assets "
+                        "WHERE work_id IS NOT NULL"
+                    )
+                }
+
+            evidence_kinds = {"transcript", "subtitle", "ocr", "visual"}
+            generated_only_kinds = {"metadata", "notes", "summary"}
+            work_columns = _columns(connection, "works")
+            select_columns = [
+                name
+                for name in ("id", "kind", "library_state", "raw_metadata")
+                if name in work_columns
+            ]
+            if "id" in select_columns:
+                works = connection.execute(
+                    f"SELECT {','.join(select_columns)} FROM works"
+                ).fetchall()
+            else:
+                works = []
+            for row in works:
+                work_id = int(row["id"])
+                kinds = chunk_kinds.get(work_id, set())
+                has_evidence = bool(kinds & evidence_kinds) or work_id in frame_evidence
+                if has_evidence:
+                    connection.execute(
+                        "UPDATE works SET evidence_state='sufficient' WHERE id=?",
+                        (work_id,),
+                    )
+
+                metadata = _json_dict(
+                    row["raw_metadata"] if "raw_metadata" in row.keys() else None
+                )
+                media_policy = metadata.get("media_policy")
+                permission = (
+                    str(media_policy.get("download_permission") or "unknown").lower()
+                    if isinstance(media_policy, dict)
+                    else "unknown"
+                )
+                restricted_video = (
+                    str(row["kind"] if "kind" in row.keys() else "") == "video"
+                    and str(
+                        row["library_state"] if "library_state" in row.keys() else ""
+                    )
+                    == "in_library"
+                    and permission in {"denied", "unknown"}
+                    and work_id not in local_asset_work_ids
+                )
+                if not restricted_video:
+                    continue
+
+                report = json.dumps(
+                    {
+                        "migration": "v9",
+                        "video": {"available": False},
+                        "evidence_kinds": sorted(kinds & evidence_kinds),
+                    },
+                    ensure_ascii=False,
+                )
+                connection.execute(
+                    "UPDATE works SET supplement_state='required', "
+                    "supplement_reason='full_video_unavailable', track_report=? "
+                    "WHERE id=?",
+                    (report, work_id),
+                )
+                if has_evidence:
+                    continue
+                if kinds and not kinds <= generated_only_kinds:
+                    continue
+                connection.execute(
+                    "UPDATE works SET evidence_state='insufficient', "
+                    "content_text='' WHERE id=?",
+                    (work_id,),
+                )
+                for table in ("work_summaries", "knowledge_chunks", "keyframes"):
+                    if _table_exists(connection, table):
+                        connection.execute(
+                            f'DELETE FROM "{table}" WHERE work_id=?', (work_id,)
+                        )
+
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": 9}),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -375,6 +711,10 @@ def prepare_database(path: Path = DB_PATH) -> Path | None:
     backup = backup_before_upgrade(path)
     migrate_to_v4(path)
     migrate_to_v5(path)
+    migrate_to_v6(path)
+    migrate_to_v7(path)
+    migrate_to_v8(path)
+    migrate_to_v9(path)
     persist_security_cleanup_state(path)
     return backup
 

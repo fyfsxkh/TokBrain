@@ -3,48 +3,71 @@
 /* eslint-disable @next/next/no-img-element -- processed assets are served by the local API. */
 
 import { useParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { MarkdownContent } from "../../../components/MarkdownContent";
-import { API_BASE, api, WorkSummaryDetail } from "../../../lib/api";
+import { api, WorkSummaryDetail } from "../../../lib/api";
+import { localAssetUrl, resolvedAssetUrl } from "../../../lib/assets";
+import { readLibraryReturnContext } from "../../../lib/libraryReturn";
 
-function localAssetUrl(value?: string | null) {
-  return value?.startsWith("/api/") ? `${API_BASE}${value}` : null;
+function localSummaryTime(value: string) {
+  const timestamp = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`;
+  return new Date(timestamp).toLocaleString("zh-CN", { hour12: false });
 }
 
 export default function WorkSummaryPage() {
   const params = useParams<{ id: string }>();
   const workId = Number(params.id);
-  const [detail, setDetail] = useState<WorkSummaryDetail | null>(null);
-  const [error, setError] = useState("");
+  const [loadedDetail, setLoadedDetail] = useState<WorkSummaryDetail | null>(null);
+  const [loadError, setLoadError] = useState<{ workId: number; message: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const invalidWorkId = !Number.isInteger(workId) || workId <= 0;
+  const detail = loadedDetail?.work.id === workId ? loadedDetail : null;
+  const error = invalidWorkId
+    ? "作品编号无效"
+    : loadError?.workId === workId ? loadError.message : "";
 
   useEffect(() => {
-    if (!Number.isFinite(workId)) return;
+    if (!Number.isInteger(workId) || workId <= 0) return;
+    let active = true;
     api.workSummary(workId)
-      .then(setDetail)
-      .catch((reason) =>
-        setError(reason instanceof Error ? reason.message : "读取总结失败"),
-      );
+      .then((value) => { if (active) setLoadedDetail(value); })
+      .catch((reason) => {
+        if (active) {
+          setLoadError({
+            workId,
+            message: reason instanceof Error ? reason.message : "读取总结失败",
+          });
+        }
+      });
+    return () => { active = false; };
   }, [workId]);
-
-  const assetMap = useMemo(
-    () => new Map(detail?.assets.map((item) => [item.name, item.url]) || []),
-    [detail],
-  );
-  const goBack = () =>
-    window.location.assign("/?tab=library&state=in_library&view=works");
+  const goBack = (forceReload = false) => {
+    const context = readLibraryReturnContext();
+    if (!forceReload && context?.workId === workId && window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+    window.location.assign(
+      context?.workId === workId
+        ? context.url
+        : "/?tab=library&state=in_library&view=works",
+    );
+  };
   const removeWork = async () => {
     if (!window.confirm("确认永久删除这个作品、总结、索引与本地资产？此操作不可恢复。")) {
       return;
     }
     setDeleting(true);
-    setError("");
+    setLoadError(null);
     try {
       await api.remove(workId);
-      goBack();
+      goBack(true);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "删除作品失败");
+      setLoadError({
+        workId,
+        message: reason instanceof Error ? reason.message : "删除作品失败",
+      });
       setDeleting(false);
     }
   };
@@ -52,7 +75,7 @@ export default function WorkSummaryPage() {
   if (error) {
     return (
       <main className="summary-page">
-        <button className="back-link" onClick={goBack}>← 返回知识库</button>
+        <button className="back-link" onClick={() => goBack()}>← 返回知识库</button>
         <div className="empty">
           <strong>暂时无法查看总结</strong>
           <p>{error}</p>
@@ -67,9 +90,9 @@ export default function WorkSummaryPage() {
   const cover = localAssetUrl(detail.work.cover_url);
   return (
     <main className="summary-page">
-      <button className="back-link" onClick={goBack}>← 返回知识库</button>
+      <button className="back-link" onClick={() => goBack()}>← 返回知识库</button>
       <header className="summary-hero">
-        {cover && <img src={cover} alt="" />}
+        {cover && <img src={cover} alt={`${detail.work.title}封面`} />}
         <div>
           <h1>{detail.work.title}</h1>
           <p>
@@ -89,9 +112,7 @@ export default function WorkSummaryPage() {
             <span>
               总结时间：
               {detail.summary.generated_at
-                ? new Date(detail.summary.generated_at).toLocaleString("zh-CN", {
-                    hour12: false,
-                  })
+                ? localSummaryTime(detail.summary.generated_at)
                 : "—"}
             </span>
           </div>
@@ -101,31 +122,20 @@ export default function WorkSummaryPage() {
         {detail.summary.tags.map((tag) => <span key={tag}>#{tag}</span>)}
       </div>
       <section className="summary-content">
-        {detail.summary.sections.map((section, index) => {
-          const asset = detail.assets[index];
-          const assetUrl = asset && assetMap.get(asset.name);
-          return (
+        {detail.summary.sections.map((section, index) => (
             <article className="summary-section" key={`${section.kind}-${index}`}>
               <h2>{section.title}</h2>
               <MarkdownContent content={section.body} />
-              {assetUrl && (
-                <img
-                  className="section-image"
-                  src={`${API_BASE}${assetUrl}`}
-                  alt={`${detail.work.title}相关图片`}
-                />
-              )}
             </article>
-          );
-        })}
-        {detail.assets.length > detail.summary.sections.length && (
+        ))}
+        {detail.assets.length > 0 && (
           <article className="summary-section">
             <h2>相关图片</h2>
             <div className="summary-gallery">
-              {detail.assets.slice(detail.summary.sections.length).map((asset) => (
+              {detail.assets.map((asset) => (
                 <img
                   key={asset.name}
-                  src={`${API_BASE}${asset.url}`}
+                  src={resolvedAssetUrl(asset.url)}
                   alt={`${detail.work.title}相关图片`}
                 />
               ))}

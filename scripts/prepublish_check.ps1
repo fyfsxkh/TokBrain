@@ -1,6 +1,7 @@
 ﻿param(
     [string]$GitExecutable = "git",
-    [switch]$Full
+    [switch]$Full,
+    [switch]$RequireClean
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +25,24 @@ Invoke-Checked "Git repository check" {
     & $GitExecutable rev-parse --is-inside-work-tree
 }
 
+if ($RequireClean) {
+    $workingTreeStatus = @(
+        & $GitExecutable -c core.quotepath=false status --porcelain=v1 `
+            --untracked-files=all
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to inspect the release working tree"
+    }
+    if ($workingTreeStatus.Count) {
+        Write-Host "Release verification requires a committed, clean target:" `
+            -ForegroundColor Red
+        $workingTreeStatus | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor Red
+        }
+        throw "Commit or deliberately remove every working-tree change before publication"
+    }
+}
+
 $requiredFiles = @(
     ".gitignore",
     "LICENSE",
@@ -33,14 +52,29 @@ $requiredFiles = @(
     "CONTRIBUTING.md",
     "README.md",
     "README.en.md",
+    "CHANGELOG.md",
+    "操作说明书.md",
     "setup.cmd",
+    "start.cmd",
+    "start.ps1",
+    "启动.cmd",
+    "停止.cmd",
+    "重启.cmd",
     "安装.cmd",
+    "scripts/setup.ps1",
+    "scripts/stop.ps1",
+    "scripts/prepublish_check.ps1",
+    "scripts/audit_library.py",
+    "scripts/push_to_tokbrain.py",
     "docs/screenshots/import-workspace.png",
     "docs/screenshots/knowledge-library.png",
     "docs/screenshots/grounded-chat.png",
     ".env.example",
     "requirements.txt",
+    "requirements-billing.txt",
+    "requirements-dev.txt",
     "requirements-f2.txt",
+    "frontend/package.json",
     "frontend/package-lock.json",
     ".github/workflows/ci.yml",
     ".github/dependabot.yml"
@@ -51,6 +85,56 @@ if ($missing.Count) {
     throw "Missing release files: $($missing -join ', ')"
 }
 
+$mainSource = Get-Content -Raw -Encoding UTF8 -LiteralPath "app/main.py"
+$migrationSource = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+    "app/services/migrations.py"
+)
+$appVersionMatch = [regex]::Match(
+    $mainSource,
+    'APP_VERSION\s*=\s*["'']([^"'']+)["'']'
+)
+$contractMatch = [regex]::Match(
+    $mainSource,
+    'API_CONTRACT_VERSION\s*=\s*(\d+)'
+)
+$schemaMatch = [regex]::Match(
+    $migrationSource,
+    'SCHEMA_VERSION\s*=\s*(\d+)'
+)
+if (-not $appVersionMatch.Success -or -not $contractMatch.Success -or
+    -not $schemaMatch.Success) {
+    throw "Unable to read application, API contract, or schema version"
+}
+$appVersion = $appVersionMatch.Groups[1].Value
+$apiContract = $contractMatch.Groups[1].Value
+$schemaVersion = $schemaMatch.Groups[1].Value
+$frontendPackageSource = Get-Content -Raw -Encoding UTF8 `
+    -LiteralPath "frontend/package.json"
+$frontendLockSource = Get-Content -Raw -Encoding UTF8 `
+    -LiteralPath "frontend/package-lock.json"
+$frontendPackageVersion = [regex]::Match(
+    $frontendPackageSource,
+    '"version"\s*:\s*"([^"]+)"'
+).Groups[1].Value
+$frontendLockVersion = [regex]::Match(
+    $frontendLockSource,
+    '"version"\s*:\s*"([^"]+)"'
+).Groups[1].Value
+if ($frontendPackageVersion -ne $appVersion -or
+    $frontendLockVersion -ne $appVersion) {
+    throw "Backend, frontend package, and lockfile versions must match $appVersion"
+}
+foreach ($documentationPath in @(
+    "README.md", "README.en.md", "操作说明书.md", "CHANGELOG.md"
+)) {
+    $documentation = Get-Content -Raw -Encoding UTF8 -LiteralPath $documentationPath
+    if ($documentation -notmatch [regex]::Escape("v$appVersion") -or
+        $documentation -notmatch "(?i)schema\s+v$schemaVersion" -or
+        $documentation -notmatch "(?i)API\s+contract[^\r\n]{0,40}$apiContract") {
+        throw "$documentationPath does not describe v$appVersion / schema v$schemaVersion / API contract $apiContract"
+    }
+}
+
 $candidateFiles = @(
     & $GitExecutable -c core.quotepath=false ls-files --cached --others --exclude-standard
 )
@@ -59,13 +143,22 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $forbiddenPathPattern = (
-    '(^|/)(data|logs|backups|node_modules|\.next|\.venv(?:-[^/]+)?|\.vendor|\.agents|\.codex)/' +
-    '|(^|/)\.env$|\.(db|db-[^/]+|sqlite|sqlite3|pem|key|zip|log)$'
+    '(^|/)(data|logs|backups|exports|media|keyframes|source-assets|' +
+    'node_modules|\.next|out|\.venv(?:-[^/]+)?|\.vendor|__pycache__|' +
+    '\.pytest_cache|htmlcov|\.test-tmp|\.agents|\.codex|\.idea|\.vscode|' +
+    '_upstream|_f2_research)(/|$)' +
+    '|(^|/)(\.env(?:\..+)?|\.npmrc|\.pypirc|\.netrc|pip\.ini|' +
+    'cookies?\.(txt|json)|session\.json|credentials\.json|' +
+    'id_(rsa|ed25519)(\..+)?|\.coverage|\.DS_Store|Thumbs\.db)$' +
+    '|\.(py[cod]|db|db-[^/]+|sqlite|sqlite3|bak|sql|pem|key|p12|pfx|' +
+    'zip|log|mp4|mov|mkv|webm|mp3|m4a|wav|srt|vtt|ass)$'
 )
 $forbiddenFiles = @(
     $candidateFiles |
         ForEach-Object { $_.Replace('\', '/') } |
-        Where-Object { $_ -match $forbiddenPathPattern }
+        Where-Object {
+            $_ -ne ".env.example" -and $_ -match $forbiddenPathPattern
+        }
 )
 if ($forbiddenFiles.Count) {
     Write-Host "Forbidden release candidates:" -ForegroundColor Red
@@ -201,13 +294,21 @@ finally {
 }
 
 if ($Full) {
+    Invoke-Checked "Python dependency consistency" {
+        & ".\.venv\Scripts\python.exe" -m pip check
+    }
+    Invoke-Checked "Python syntax compilation" {
+        & ".\.venv\Scripts\python.exe" -m compileall -q app scripts tests
+    }
     Invoke-Checked "Backend tests" {
-        & ".\.venv\Scripts\python.exe" -m pytest -q
+        & ".\.venv\Scripts\python.exe" -m pytest -q -p no:cacheprovider `
+            --basetemp ".test-tmp\prepublish"
     }
     Push-Location frontend
     try {
         Invoke-Checked "Frontend tests" { npm test }
         Invoke-Checked "Frontend lint" { npm run lint }
+        Invoke-Checked "Frontend strict typecheck" { npm run typecheck }
         Invoke-Checked "Frontend production build" { npm run build }
         Invoke-Checked "Production dependency audit" {
             npm audit --omit=dev --audit-level=high

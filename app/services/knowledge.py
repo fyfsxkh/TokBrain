@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,10 @@ from app.services.budget import consume, record_usage, release, reserve
 from app.services.pricing import PRICE_VERSION
 from app.services.providers import DashScopeProvider
 from app.services.secrets import get_secret
+
+
+ORIGINAL_EVIDENCE_KINDS = {"subtitle", "transcript", "ocr", "visual"}
+RETRIEVABLE_SOURCE_KINDS = ORIGINAL_EVIDENCE_KINDS | {"notes"}
 
 
 def cosine(left: list[float], right: list[float]) -> float:
@@ -49,7 +55,33 @@ def lexical_score(question: str, text: str) -> float:
     return matched + exact_phrase
 
 
+def _score_chunks(
+    question: str,
+    query_vector: list[float] | None,
+    rows: list[tuple[KnowledgeChunk, Work]],
+) -> list[tuple[float, bool, float, KnowledgeChunk, Work]]:
+    """CPU-only ranking kept outside the API event loop for large libraries."""
+
+    scored: list[tuple[float, bool, float, KnowledgeChunk, Work]] = []
+    for chunk, work in rows:
+        semantic = bool(query_vector and chunk.embedding)
+        lexical = lexical_score(
+            question,
+            f"{work.title}\n{work.description}\n{chunk.text}",
+        )
+        semantic_score = cosine(query_vector, chunk.embedding) if semantic else -1.0
+        score = semantic_score + min(2.0, lexical) * 0.6 if semantic else lexical
+        scored.append((score, semantic, lexical, chunk, work))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
 async def search(session: AsyncSession, question: str, top_k: int = 8) -> list[dict]:
+    grounded_work_ids = (
+        select(KnowledgeChunk.work_id)
+        .where(KnowledgeChunk.source_kind.in_(ORIGINAL_EVIDENCE_KINDS))
+        .distinct()
+    )
     rows = (
         await session.execute(
             select(KnowledgeChunk, Work)
@@ -57,6 +89,9 @@ async def search(session: AsyncSession, question: str, top_k: int = 8) -> list[d
             .where(
                 Work.library_state == "in_library",
                 Work.processing_state == "processed",
+                Work.evidence_state.in_({"sufficient", "unverified"}),
+                KnowledgeChunk.source_kind.in_(RETRIEVABLE_SOURCE_KINDS),
+                Work.id.in_(grounded_work_ids),
             )
         )
     ).all()
@@ -104,20 +139,11 @@ async def search(session: AsyncSession, question: str, top_k: int = 8) -> list[d
                 reservation,
                 actual_llm_tokens=usage.input_tokens + usage.output_tokens,
             )
-        except Exception:
+        except Exception as exc:
             await release(session, reservation)
-            raise
-    scored: list[tuple[float, bool, float, KnowledgeChunk, Work]] = []
-    for chunk, work in rows:
-        semantic = bool(query_vector and chunk.embedding)
-        lexical = lexical_score(
-            question,
-            f"{work.title}\n{work.description}\n{chunk.text}",
-        )
-        semantic_score = cosine(query_vector, chunk.embedding) if semantic else -1.0
-        score = semantic_score + min(2.0, lexical) * 0.6 if semantic else lexical
-        scored.append((score, semantic, lexical, chunk, work))
-    scored.sort(key=lambda item: item[0], reverse=True)
+            logger.warning("向量检索不可用，已降级为本地词法检索: {}", exc)
+            query_vector = None
+    scored = await asyncio.to_thread(_score_chunks, question, query_vector, list(rows))
     grouped: dict[int, dict] = {}
     for score, semantic, lexical, chunk, work in scored:
         semantic_score = score - min(2.0, lexical) * 0.6 if semantic else -1.0

@@ -1,20 +1,25 @@
 {
   "name": "tokbrain-frontend",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "license": "MIT",
+  "packageManager": "npm@10.9.4",
+  "engines": {
+    "node": ">=22"
+  },
   "overrides": {
-    "brace-expansion": "5.0.8",
+    "brace-expansion": "5.0.9",
     "minimatch": "10.2.6",
     "postcss": "8.5.23",
     "sharp": "0.35.3"
   },
   "scripts": {
-    "dev": "next dev --hostname 127.0.0.1",
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
     "build": "next build",
-    "start": "next start --hostname 127.0.0.1",
+    "start": "next start --hostname 127.0.0.1 --port 3000",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit --incremental false --noUnusedLocals --noUnusedParameters",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {

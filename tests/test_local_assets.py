@@ -12,6 +12,7 @@ from app.services.local_assets import (
     LocalAssetError,
     _kind_and_extension,
     store_local_assets,
+    store_work_supplement,
 )
 
 
@@ -83,10 +84,14 @@ async def test_images_use_uuid_paths_and_ignore_client_filename(tmp_path, monkey
     ]
     await store_local_assets(session, item.id, uploads)
     stored = (
-        await session.execute(
-            select(WorkSourceAsset).order_by(WorkSourceAsset.position)
+        (
+            await session.execute(
+                select(WorkSourceAsset).order_by(WorkSourceAsset.position)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     root = (tmp_path / "source-assets" / f"item-{item.id}").resolve()
     assert len(stored) == 2
     assert all(Path(row.path).resolve().is_relative_to(root) for row in stored)
@@ -181,5 +186,164 @@ async def test_expired_confirmed_work_accepts_local_asset_without_losing_linkage
     assert stored.work_id == work.id
     assert work.library_state == "issues"
     assert work.last_error_code is None
+    await session.close()
+    await engine.dispose()
+
+
+async def test_asset_replacement_keeps_old_file_when_database_commit_fails(
+    tmp_path, monkeypatch
+):
+    engine, session, item = await asset_session(tmp_path)
+    monkeypatch.setattr(assets, "DATA_DIR", tmp_path)
+    directory = tmp_path / "source-assets" / f"item-{item.id}"
+    directory.mkdir(parents=True)
+    old_path = directory / "old.png"
+    old_path.write_bytes(image_bytes())
+    old_asset = WorkSourceAsset(
+        import_item_id=item.id,
+        kind="image",
+        path=str(old_path),
+        mime_type="image/png",
+        size_bytes=old_path.stat().st_size,
+        sha256="old-sha",
+        position=0,
+    )
+    session.add(old_asset)
+    await session.commit()
+    item_id = item.id
+
+    real_commit = session.commit
+
+    async def fail_commit():
+        raise RuntimeError("simulated commit failure")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await store_local_assets(session, item.id, [Upload(image_bytes("WEBP"))])
+    monkeypatch.setattr(session, "commit", real_commit)
+
+    stored = list(
+        (
+            await session.execute(
+                select(WorkSourceAsset).where(WorkSourceAsset.import_item_id == item_id)
+            )
+        ).scalars()
+    )
+    assert old_path.is_file()
+    assert [row.path for row in stored] == [str(old_path)]
+    assert sorted(path.name for path in directory.iterdir()) == [old_path.name]
+    await session.close()
+    await engine.dispose()
+
+
+async def test_work_image_supplement_replaces_assets_without_changing_library_state(
+    tmp_path, monkeypatch
+):
+    engine, session, _ = await asset_session(tmp_path)
+    monkeypatch.setattr(assets, "DATA_DIR", tmp_path)
+    work = Work(
+        platform_work_id="image-supplement",
+        kind="image",
+        title="缺图图文",
+        library_state="in_library",
+        processing_state="processed",
+        supplement_state="required",
+        supplement_reason="image_set_incomplete",
+        evidence_state="sufficient",
+    )
+    session.add(work)
+    await session.commit()
+
+    work, result = await store_work_supplement(
+        session,
+        work.id,
+        [
+            Upload(image_bytes("PNG"), "one.png"),
+            Upload(image_bytes("WEBP"), "two.webp"),
+        ],
+        rights_attested=True,
+    )
+    stored = list(
+        (
+            await session.execute(
+                select(WorkSourceAsset)
+                .where(WorkSourceAsset.work_id == work.id)
+                .order_by(WorkSourceAsset.position)
+            )
+        ).scalars()
+    )
+    original_paths = [row.path for row in stored]
+
+    assert result["asset_count"] == 2
+    assert result["idempotent"] is False
+    assert work.library_state == "in_library"
+    assert work.processing_state == "processed"
+    assert work.supplement_state == "uploaded"
+    assert work.supplement_reason == "image_set_incomplete"
+    assert work.evidence_state == "unverified"
+    assert work.track_report["images"]["processed"] == 2
+    assert work.raw_metadata["supplement_provenance"]["rights_attested"] is True
+    assert all(Path(row.path).parent.name == f"work-{work.id}" for row in stored)
+
+    _, replay = await store_work_supplement(
+        session,
+        work.id,
+        [
+            Upload(image_bytes("PNG"), "one.png"),
+            Upload(image_bytes("WEBP"), "two.webp"),
+        ],
+        rights_attested=True,
+    )
+    replayed_assets = list(
+        (
+            await session.execute(
+                select(WorkSourceAsset)
+                .where(WorkSourceAsset.work_id == work.id)
+                .order_by(WorkSourceAsset.position)
+            )
+        ).scalars()
+    )
+    assert replay["idempotent"] is True
+    assert [row.path for row in replayed_assets] == original_paths
+    assert len(replayed_assets) == 2
+    await session.close()
+    await engine.dispose()
+
+
+async def test_work_supplement_requires_attestation_and_matching_media_kind(
+    tmp_path, monkeypatch
+):
+    engine, session, _ = await asset_session(tmp_path)
+    monkeypatch.setattr(assets, "DATA_DIR", tmp_path)
+    work = Work(
+        platform_work_id="video-supplement",
+        kind="video",
+        title="缺视频",
+        library_state="in_library",
+        supplement_state="required",
+    )
+    session.add(work)
+    await session.commit()
+
+    unattested = Upload(image_bytes(), "wrong.png")
+    with pytest.raises(LocalAssetError) as captured:
+        await store_work_supplement(
+            session, work.id, [unattested], rights_attested=False
+        )
+    assert captured.value.code == "rights_attestation_required"
+    assert unattested.closed
+
+    with pytest.raises(LocalAssetError) as captured:
+        await store_work_supplement(
+            session,
+            work.id,
+            [Upload(image_bytes(), "wrong.png")],
+            rights_attested=True,
+        )
+    assert captured.value.code == "unsupported_media"
+    assert not await session.scalar(
+        select(WorkSourceAsset.id).where(WorkSourceAsset.work_id == work.id)
+    )
+    assert work.library_state == "in_library"
     await session.close()
     await engine.dispose()

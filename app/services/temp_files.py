@@ -42,7 +42,7 @@ def cleanup_stale_temp_media(root: Path) -> int:
     if not root.is_dir():
         return 0
     removed = 0
-    for pattern in ("*.asr.wav", "*.asr.opus", "*.mp4"):
+    for pattern in ("*.asr.wav", "*.asr.opus", "*.restricted-audio", "*.mp4"):
         for path in root.glob(pattern):
             if path.is_file() and unlink_with_retries(path):
                 removed += 1

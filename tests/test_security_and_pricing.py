@@ -1,20 +1,20 @@
+import io
 from pathlib import Path
+from http import HTTPStatus
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from loguru import logger
 
+import app.main as app_main
 import app.services.downloader as downloader
 import app.services.providers as providers
 from app.main import app
-from app.services.downloader import DownloadError, download_media, is_allowed_media_url
-from app.services.errors import (
-    classify_error,
-    normalized_error_code,
-    safe_error_message,
-    user_error_message,
-)
+from app.services.downloader import DownloadError, download_media
+from app.services.errors import classify_error, safe_error_message
 from app.services.pricing import asr_cost, token_cost
-from app.services.f2_links import F2AccessGate, PublicLinkError
+from app.services.f2_links import F2AccessGate, PublicLinkError, validate_media_url
 
 
 async def no_sleep(_seconds: float) -> None:
@@ -34,11 +34,18 @@ async def ignore_circuit(_error) -> None:
 
 
 def test_media_allowlist_rejects_suffix_confusion_and_plain_http():
-    assert is_allowed_media_url("https://v3-web.douyinvod.com/file.mp4")
-    assert is_allowed_media_url("https://p3.douyinpic.com/image.jpg")
-    assert is_allowed_media_url("https://v5-dy-ov-experiment.zjcdn.com/file.mp4")
-    assert not is_allowed_media_url("https://douyinvod.com.evil.example/file.mp4")
-    assert not is_allowed_media_url("http://v3-web.douyinvod.com/file.mp4")
+    for url in (
+        "https://v3-web.douyinvod.com/file.mp4",
+        "https://p3.douyinpic.com/image.jpg",
+        "https://v5-dy-ov-experiment.zjcdn.com/file.mp4",
+    ):
+        assert validate_media_url(url) == url
+    for url in (
+        "https://douyinvod.com.evil.example/file.mp4",
+        "http://v3-web.douyinvod.com/file.mp4",
+    ):
+        with pytest.raises(PublicLinkError):
+            validate_media_url(url)
 
 
 def test_asr_result_url_requires_public_aliyun_https(monkeypatch):
@@ -110,23 +117,123 @@ def test_asr_result_download_bounds_redirects_and_size():
         )
 
 
+def test_asr_polling_has_total_deadline_and_cancels_remote_task():
+    class Transcription:
+        cancelled = False
+
+        @classmethod
+        def fetch(cls, **_kwargs):
+            return SimpleNamespace(
+                status_code=HTTPStatus.OK,
+                output={"task_status": "RUNNING"},
+            )
+
+        @classmethod
+        def cancel(cls, **_kwargs):
+            cls.cancelled = True
+
+    ticks = iter([0.0, 2.0])
+    with pytest.raises(RuntimeError, match="等待超时"):
+        providers._wait_for_transcription(
+            Transcription,
+            "task-1",
+            api_key="test",
+            timeout_seconds=0.01,
+            monotonic=lambda: next(ticks),
+            sleep=lambda _seconds: None,
+        )
+    assert Transcription.cancelled is True
+
+
 def test_official_list_price_estimate_units():
     assert token_cost("qwen3.5-ocr", 1_000_000, 1_000_000) == 2.5
     assert token_cost("text-embedding-v4", 1_000) == 0.0005
     assert asr_cost("paraformer-v2", 60) == pytest.approx(0.0048)
 
 
-def test_error_messages_strip_query_and_never_invent_private_or_deleted_reason():
+def test_error_messages_strip_sensitive_url_details():
     message = safe_error_message(
         "403 for https://v26-web.douyinvod.com/video/file?token=secret&expires=1"
     )
     assert message == "403 for https://v26-web.douyinvod.com"
     assert "secret" not in message
-    assert "上传本地文件" in user_error_message("media_expired", message)
-    unavailable = user_error_message("work_unavailable", "unknown")
-    assert "可能" in unavailable
     assert classify_error(PublicLinkError("network_error")) == "network_error"
-    assert normalized_error_code(None, None) is None
+
+
+def test_error_messages_redact_common_secret_assignments():
+    message = safe_error_message(
+        '模型失败 api_key=sk-secret token:"token-secret" '
+        "Authorization: Bearer auth-secret cookie=session-secret"
+    )
+
+    assert message.startswith("模型失败")
+    for secret in ("sk-secret", "token-secret", "auth-secret", "session-secret"):
+        assert secret not in message
+    assert message.count("[REDACTED]") >= 4
+
+
+def test_asr_upload_retries_transient_tls_failure_once():
+    class SSLError(Exception):
+        pass
+
+    SSLError.__module__ = "requests.exceptions"
+
+    class OssUtils:
+        calls = 0
+
+        @classmethod
+        def upload(cls, **_kwargs):
+            cls.calls += 1
+            if cls.calls == 1:
+                raise SSLError("SSL: UNEXPECTED_EOF_WHILE_READING")
+            return "oss://bucket/audio.opus"
+
+    waits: list[float] = []
+    result = providers._upload_asr_audio(
+        OssUtils,
+        model="paraformer-v2",
+        file_path="audio.opus",
+        api_key="not-logged",
+        sleep=waits.append,
+    )
+
+    assert result == "oss://bucket/audio.opus"
+    assert OssUtils.calls == 2
+    assert waits == [1.0]
+
+
+def test_asr_upload_reports_stable_network_error_after_retry():
+    class OssUtils:
+        @classmethod
+        def upload(cls, **_kwargs):
+            raise RuntimeError("HTTPSConnectionPool SSLError")
+
+    with pytest.raises(RuntimeError, match="代理") as captured:
+        providers._upload_asr_audio(
+            OssUtils,
+            model="paraformer-v2",
+            file_path="audio.opus",
+            api_key="not-logged",
+            sleep=lambda _seconds: None,
+        )
+
+    assert classify_error(captured.value) == "network_error"
+
+
+def test_safe_logging_does_not_render_local_credentials():
+    output = io.StringIO()
+    secret = "credential-sensitive-value-that-must-not-appear"
+    app_main._configure_safe_logging(output)
+    try:
+        try:
+            api_key = secret
+            raise RuntimeError("provider failed")
+        except RuntimeError:
+            logger.exception("provider call failed")
+        assert api_key == secret
+        assert secret not in output.getvalue()
+    finally:
+        app_main._configure_safe_logging()
 
 
 async def test_media_downloader_retries_five_x_once_and_validates_mime(
@@ -245,3 +352,30 @@ def test_runtime_dependencies_keep_pinned_f2_without_browser_stack():
     assert "requirements-f2.txt" in setup
     assert "--no-deps" in setup
     assert "python-multipart==" in requirements
+
+
+async def test_provider_reuses_and_closes_openai_clients(monkeypatch):
+    await providers.close_provider_clients()
+
+    class Client:
+        instances: list["Client"] = []
+
+        def __init__(self, **_kwargs):
+            self.closed = False
+            self.instances.append(self)
+
+        async def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(providers, "AsyncOpenAI", Client)
+    first = providers.DashScopeProvider("same-key")
+    second = providers.DashScopeProvider("same-key")
+    third = providers.DashScopeProvider("other-key")
+
+    assert first.client is second.client
+    assert first.client is not third.client
+    assert len(Client.instances) == 2
+
+    await providers.close_provider_clients()
+
+    assert all(client.closed for client in Client.instances)

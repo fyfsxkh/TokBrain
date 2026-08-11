@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting
@@ -99,11 +100,12 @@ async def refresh_official_bill(session: AsyncSession) -> dict:
             "message": "官方账单存在结算延迟，仅供对账",
         }
     except Exception as exc:
+        logger.exception("读取官方账单失败: {}", exc)
         value = {
             "status": "error",
             "amount_cny": None,
             "data_as_of": datetime.now(timezone.utc).isoformat(),
-            "message": str(exc),
+            "message": "官方账单暂时无法读取，请稍后重试",
         }
     record = await session.get(AppSetting, "official_bill")
     if record:

@@ -2,7 +2,15 @@ export type Probe = {
   probe: string;
   status: "healthy" | "degraded" | "down";
   message: string;
-  details: Record<string, unknown>;
+  details: Record<string, unknown> & {
+    coordinators?: Array<{
+      name: string;
+      alive: boolean;
+      workers_alive: number;
+      workers_expected: number;
+      last_error: string | null;
+    }>;
+  };
 };
 
 export type Health = {
@@ -45,6 +53,27 @@ export type RuntimeSettings = {
   import_cooldown_max_seconds: number;
 };
 
+export type RuntimeSettingsUpdate = Partial<Pick<RuntimeSettings,
+  | "daily_media_minutes_limit"
+  | "daily_llm_token_limit"
+  | "monthly_warning_cny"
+  | "scene_threshold"
+  | "max_scene_candidates"
+  | "max_keyframes"
+  | "min_keyframe_gap_seconds"
+  | "default_answer_format"
+  | "summary_prompt"
+  | "processing_model"
+  | "chat_fast_model"
+  | "chat_deep_model"
+>> & {
+  dashscope_api_key?: string;
+  bss_access_key_id?: string;
+  bss_access_key_secret?: string;
+  f2_cookie?: string;
+  clear_f2_cookie?: boolean;
+};
+
 export type Usage = {
   month_estimated_cny: number;
   official_billed_cny: number | null;
@@ -83,6 +112,8 @@ export type Job = {
 
 export type ImportItem = {
   id: number;
+  client_item_id: string | null;
+  platform: string;
   ordinal: number;
   input_url: string;
   normalized_url: string;
@@ -103,10 +134,12 @@ export type ImportItem = {
   download_permission: "allowed" | "denied" | "unknown";
   processing_mode: "full_media" | "subtitle_or_audio";
   has_audio_or_subtitle: boolean;
+  target_collection_id: number | null;
 };
 
 export type ImportBatch = {
   id: string;
+  source_type: "link" | "local_upload" | "external_batch" | "package_upload";
   job_id: string;
   state: string;
   total_items: number;
@@ -125,7 +158,97 @@ export type ImportBatch = {
     error_code: string | null;
     message: string | null;
   };
+  package?: {
+    upload_mode: "folder" | "zip";
+    analysis_state: string;
+    uploaded_count: number;
+    file_count: number;
+    target_collection_id: number | null;
+  };
+  package_files?: PackageImportFile[];
   items: ImportItem[];
+};
+
+export type ImportBatchCreateRequest = {
+  text: string;
+};
+
+export type PackageImportFile = {
+  id: string;
+  client_file_id: string;
+  relative_path: string;
+  role: "video" | "metadata" | "archive" | "unknown";
+  status: string;
+  declared_size: number;
+  size_bytes: number;
+  sha256: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  upload_url: string | null;
+};
+
+export type PackageImportBatchRequest = {
+  rights_attested: true;
+  upload_mode: "folder" | "zip";
+  target_collection_id?: number;
+  files: Array<{
+    client_file_id: string;
+    relative_path: string;
+    size_bytes: number;
+  }>;
+};
+
+export type ImportBatchCreated = {
+  batch_id: string;
+  job_id: string;
+  accepted_count: number;
+  rejected_count: number;
+  queued_count: number;
+  duplicate_count: number;
+};
+
+export type LocalImportBatchRequest = {
+  rights_attested: true;
+  items: Array<{
+    client_item_id: string;
+    filename: string;
+    size_bytes: number;
+    target_collection_id?: number;
+  }>;
+};
+
+export type LocalVideoUploadResult = {
+  batch_id: string;
+  item_id: number;
+  status: string;
+  kind: string;
+  duration_seconds: number;
+  sha256: string;
+  budget_estimate?: { media_minutes: number; llm_tokens: number } | null;
+  existing_work_id?: number | null;
+};
+
+export type ImportItemUpdate = {
+  title?: string;
+  description?: string;
+  target_collection_id?: number | null;
+};
+
+export type ImportItemUpdateResult = {
+  item_id: number;
+  title: string | null;
+  description: string | null;
+  target_collection_id: number | null;
+};
+
+export type IntegrationTokenStatus = {
+  configured: boolean;
+  prefix: string | null;
+  created_at: string | null;
+};
+
+export type IntegrationTokenCreated = IntegrationTokenStatus & {
+  token: string;
 };
 
 export type Collection = {
@@ -152,28 +275,59 @@ export type LibrarySummary = {
   local_item_count: number;
   issue_count: number;
   archived_count: number;
+  supplement_count?: number;
   known_distinct_count: number;
   remote_folder_item_sum: number;
 };
+
+export type SupplementState =
+  | "none"
+  | "required"
+  | "uploaded"
+  | "processing"
+  | "failed";
+
+export type EvidenceState = "unverified" | "sufficient" | "insufficient";
+
+export type TrackReport = Record<string, unknown>;
 
 export type Work = {
   id: number;
   platform_work_id: string;
   kind: string;
   title: string;
-  author_name?: string;
+  author_name?: string | null;
   duration_seconds: number;
-  cover_url?: string;
-  source_url?: string;
+  cover_url?: string | null;
+  source_url?: string | null;
   processing_state: string;
   library_state: string;
   selected: boolean;
-  process_error?: string;
-  error_code?: string;
+  process_error?: string | null;
+  error_code?: string | null;
   last_seen_at: string;
   collections: string[];
   summary_state: "missing" | "ready" | "failed" | "generating";
   summary_excerpt?: string | null;
+  supplement_state?: SupplementState;
+  supplement_reason?: string | null;
+  evidence_state?: EvidenceState;
+  track_report?: TrackReport | null;
+};
+
+export type WorkSupplementResult = {
+  id: number;
+  library_state: string;
+  supplement_state: SupplementState;
+  supplement_reason?: string | null;
+  reason?: string | null;
+  evidence_state: EvidenceState;
+  track_report: TrackReport;
+  asset_count: number;
+  sha256: string[];
+  duration_seconds: number;
+  idempotent: boolean;
+  job: Job;
 };
 
 export type WorksPage = {
@@ -194,11 +348,6 @@ export type ChatSource = {
   timestamp_seconds: number | null;
   external_url: string | null;
   source_kind: string;
-};
-
-export type ChatAnswer = {
-  answer: string;
-  sources: ChatSource[];
 };
 
 export type ChatStreamEvent =

@@ -25,14 +25,6 @@ class DownloadError(RuntimeError):
         super().__init__(message)
 
 
-def is_allowed_media_url(url: str) -> bool:
-    try:
-        validate_media_url(url)
-    except PublicLinkError:
-        return False
-    return True
-
-
 async def _ensure_f2_access_allowed() -> None:
     from app.database import async_session_factory
     from app.services.import_queue import circuit_state
