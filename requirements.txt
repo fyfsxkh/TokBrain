@@ -23,7 +23,7 @@ aiofiles==24.1.0
 babel==2.13.0
 browser-cookie3==0.20.1
 click==8.4.2
-cryptography==48.0.1
+cryptography==50.0.0
 gmssl==3.2.2
 importlib-resources==6.4.5
 jsonpath-ng==1.6.1
