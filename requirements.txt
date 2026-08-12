@@ -19,7 +19,7 @@ tzdata==2025.2
 # F2 runtime compatibility dependencies. F2 itself is installed with
 # --no-deps into .vendor/ by scripts/setup.ps1 because its 0.0.1.7 package
 # metadata pins outdated vulnerable versions and unnecessary test tools.
-aiofiles==24.1.0
+aiofiles==25.1.0
 babel==2.13.0
 browser-cookie3==0.20.1
 click==8.4.2
