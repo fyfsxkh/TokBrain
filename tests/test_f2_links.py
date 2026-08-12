@@ -259,7 +259,9 @@ def test_f2_403_exception_always_opens_circuit(has_cookie):
     class APIForbiddenError(Exception):
         status_code = 403
 
-    error = _classify_f2_exception(APIForbiddenError("forbidden"), has_cookie=has_cookie)
+    error = _classify_f2_exception(
+        APIForbiddenError("forbidden"), has_cookie=has_cookie
+    )
 
     assert error.code == "access_forbidden"
     assert error.opens_circuit is True
@@ -289,6 +291,35 @@ async def test_note_payload_is_normalized_as_image_post():
     )
     assert work.kind == "image"
     assert len(work.image_urls) == 2
+
+
+async def test_note_images_are_kept_when_video_download_permission_is_denied():
+    note_id = "7359999999999999998"
+
+    async def detail(_work_id: str, _cookie: str) -> dict:
+        return {
+            "status_code": 0,
+            "aweme_detail": {
+                "aweme_id": note_id,
+                "aweme_type": 68,
+                "video_control": {"allow_download": False},
+                "desc": "禁止视频下载标记下的公开图文",
+                "images": [
+                    {"url_list": ["https://p1.douyinpic.com/1.webp"]},
+                    {"url_list": ["https://p1.douyinpic.com/2.webp"]},
+                ],
+            },
+        }
+
+    work = await F2WorkClient(detail_fetcher=detail).resolve(
+        f"https://www.douyin.com/note/{note_id}"
+    )
+
+    assert work.kind == "image"
+    assert work.download_permission == "denied"
+    assert work.processing_mode == "full_images"
+    assert len(work.image_urls) == 2
+    assert work.raw_metadata["media_policy"]["expected_image_count"] == 2
 
 
 async def test_short_link_checks_redirect_before_f2_detail():

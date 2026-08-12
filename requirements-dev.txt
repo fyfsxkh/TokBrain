@@ -1,0 +1,5 @@
+# Test, coverage, and dependency-audit tools. Not installed for end users.
+pytest==9.1.1
+pytest-asyncio==1.4.0
+coverage==7.10.6
+pip-audit==2.10.1

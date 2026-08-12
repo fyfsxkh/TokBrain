@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+SupplementState = Literal["none", "required", "uploaded", "processing", "failed"]
+EvidenceState = Literal["unverified", "sufficient", "insufficient"]
 
 
 class SettingsView(BaseModel):
@@ -95,6 +99,7 @@ class UsageSummary(BaseModel):
 
 
 class ImportBatchCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=100000)
 
 
@@ -105,14 +110,154 @@ class ImportSelection(BaseModel):
 
 class ImportConfirm(BaseModel):
     # Kept for compatibility. Items without an explicit collection use 手动导入.
-    item_ids: list[int] = Field(default_factory=list, max_length=10)
-    items: list[ImportSelection] = Field(default_factory=list, max_length=10)
+    item_ids: list[int] = Field(default_factory=list, max_length=100)
+    items: list[ImportSelection] = Field(default_factory=list, max_length=100)
+
+
+CLIENT_ITEM_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"
+DOUYIN_WORK_ID_PATTERN = r"^[0-9]{1,64}$"
+SHA256_PATTERN = r"^[0-9a-fA-F]{64}$"
+
+
+class StrictImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LocalImportItemCreate(StrictImportRequest):
+    client_item_id: str = Field(pattern=CLIENT_ITEM_PATTERN)
+    filename: str = Field(min_length=1, max_length=260)
+    size_bytes: int = Field(gt=0, le=1024 * 1024 * 1024)
+    target_collection_id: int | None = Field(default=None, ge=1)
+
+
+class LocalImportBatchCreate(StrictImportRequest):
+    rights_attested: Literal[True]
+    items: list[LocalImportItemCreate] = Field(min_length=1, max_length=10)
+
+
+class PackageImportFileCreate(StrictImportRequest):
+    client_file_id: str = Field(pattern=CLIENT_ITEM_PATTERN)
+    relative_path: str = Field(min_length=1, max_length=1000)
+    size_bytes: int = Field(gt=0, le=20 * 1024 * 1024 * 1024)
+
+
+class PackageImportBatchCreate(StrictImportRequest):
+    rights_attested: Literal[True]
+    upload_mode: Literal["folder", "zip"]
+    target_collection_id: int | None = Field(default=None, ge=1)
+    files: list[PackageImportFileCreate] = Field(min_length=1, max_length=1000)
+
+
+class ImportItemUpdate(StrictImportRequest):
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=20_000)
+    target_collection_id: int | None = Field(default=None, ge=1)
+
+
+class ExternalImportItemCreate(StrictImportRequest):
+    client_item_id: str = Field(pattern=CLIENT_ITEM_PATTERN)
+    platform_work_id: str = Field(pattern=DOUYIN_WORK_ID_PATTERN)
+    video_pending: Literal[True]
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=20_000)
+    author_id: str | None = Field(default=None, max_length=120)
+    author_name: str | None = Field(default=None, max_length=200)
+    published_at: datetime | None = None
+    source_url: str | None = Field(default=None, max_length=2_000)
+    duration_seconds: float | None = Field(default=None, ge=0, le=7_200)
+    target_collection_id: int | None = Field(default=None, ge=1)
+    expected_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    extra_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExternalImportBatchCreate(StrictImportRequest):
+    rights_attested: Literal[True]
+    items: list[ExternalImportItemCreate] = Field(min_length=1, max_length=100)
+
+
+class ExternalImportCommit(StrictImportRequest):
+    start_processing: bool = False
+
+
+class ImportErrorDetail(BaseModel):
+    code: str
+    message: str
+    retryable: bool
+    field: str | None = None
+
+
+class BudgetEstimateView(BaseModel):
+    media_minutes: float
+    llm_tokens: int
+
+
+class ExternalImportItemView(BaseModel):
+    client_item_id: str
+    item_id: int
+    platform_work_id: str
+    status: str
+    existing_work_id: int | None = None
+    expected_sha256: str | None = None
+    upload_url: str | None = None
+    error: ImportErrorDetail | None = None
+
+
+class ExternalImportBatchView(BaseModel):
+    batch_id: str
+    state: str
+    source_type: Literal["external_batch"]
+    items: list[ExternalImportItemView]
+
+
+class ExternalImportBatchCreated(ExternalImportBatchView):
+    replayed: bool
+
+
+class ExternalAssetUploadView(BaseModel):
+    batch_id: str
+    client_item_id: str
+    item_id: int
+    status: str
+    duration_seconds: float
+    sha256: str
+    budget_estimate: BudgetEstimateView
+    idempotent: bool
+
+
+class ExternalCommitItemView(BaseModel):
+    client_item_id: str
+    status: Literal["imported", "duplicate", "invalid", "missing_video"]
+    work_id: int | None = None
+    error: ImportErrorDetail | None = None
+
+
+class ExternalCommitJobView(BaseModel):
+    job_id: str
+    state: str
+
+
+class ExternalCommitView(BaseModel):
+    batch_id: str
+    results: list[ExternalCommitItemView]
+    work_ids: list[int]
+    job: ExternalCommitJobView | None = None
+
+
+class IntegrationTokenView(BaseModel):
+    configured: bool
+    prefix: str | None = None
+    created_at: datetime | None = None
+
+
+class IntegrationTokenCreated(IntegrationTokenView):
+    token: str
 
 
 class JobView(BaseModel):
     id: str
     job_type: str
     state: Literal[
+        "uploading",
         "queued",
         "running",
         "cancelling",
@@ -132,6 +277,21 @@ class JobView(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     progress: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkSupplementUploadView(BaseModel):
+    id: int
+    library_state: str
+    supplement_state: SupplementState
+    supplement_reason: str | None = None
+    reason: str | None = None
+    evidence_state: EvidenceState
+    track_report: dict[str, Any] = Field(default_factory=dict)
+    asset_count: int
+    sha256: list[str] = Field(default_factory=list)
+    duration_seconds: float = 0
+    idempotent: bool = False
+    job: JobView
 
 
 class ChatTurn(BaseModel):

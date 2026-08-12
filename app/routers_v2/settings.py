@@ -5,7 +5,13 @@ from app.config import DPAPI_WARNING
 from app.config import settings
 from app.database import get_db
 from app.models import AppSetting
-from app.schemas import SettingsUpdate, SettingsView, UsageSummary
+from app.schemas import (
+    IntegrationTokenCreated,
+    IntegrationTokenView,
+    SettingsUpdate,
+    SettingsView,
+    UsageSummary,
+)
 from app.services.bss_bill import refresh_official_bill
 from app.services.budget import usage_summary
 from app.services.runtime_settings import (
@@ -16,6 +22,11 @@ from app.services.runtime_settings import (
 )
 from app.services.prompts import DEFAULT_SUMMARY_PROMPT
 from app.services.secrets import has_readable_secret, set_secret
+from app.services.import_integrations import (
+    integration_token_status,
+    revoke_integration_token,
+    rotate_integration_token,
+)
 
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -84,6 +95,23 @@ async def refresh_bill(session: AsyncSession = Depends(get_db)):
     if result.get("status") == "error":
         raise HTTPException(status_code=502, detail=result.get("message"))
     return result
+
+
+@router.get("/integration-token", response_model=IntegrationTokenView)
+async def get_integration_token(session: AsyncSession = Depends(get_db)):
+    return await integration_token_status(session)
+
+
+@router.post("/integration-token", response_model=IntegrationTokenCreated)
+async def create_integration_token(session: AsyncSession = Depends(get_db)):
+    """Generate or rotate the token; plaintext is returned exactly once."""
+
+    return await rotate_integration_token(session)
+
+
+@router.delete("/integration-token", response_model=IntegrationTokenView)
+async def delete_integration_token(session: AsyncSession = Depends(get_db)):
+    return await revoke_integration_token(session)
 
 
 @router.delete("/secrets", response_model=SettingsView)

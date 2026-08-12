@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,11 +40,17 @@ from app.services.f2_links import (
     normalize_input_url,
     sanitize_url,
 )
-from app.services.secrets import get_secret
+from app.services.secrets import SecretUnavailableError, get_secret
+from app.services.errors import safe_error_message
 
 
 ACTIVE_ITEM_STATES = {"queued", "resolving"}
-PREVIEW_SUCCESS_STATES = {"ready", "needs_local_file", "duplicate"}
+PREVIEW_SUCCESS_STATES = {
+    "ready",
+    "needs_local_file",
+    "duplicate",
+    "confirmed",
+}
 RISK_SETTING_KEY = "f2_access_circuit"
 CREATE_IMPORT_LOCK = asyncio.Lock()
 PREVIEW_IDENTITY_LOCK = asyncio.Lock()
@@ -178,7 +184,8 @@ async def resolve_submitted_link(client: F2WorkClient, url: str):
 
 
 async def create_import_batch(
-    session: AsyncSession, raw_input: str
+    session: AsyncSession,
+    raw_input: str,
 ) -> tuple[ImportBatch, list[int], int]:
     # The preflight and commit must be one local critical section. Otherwise,
     # two near-simultaneous submissions can both pass the duplicate check
@@ -188,7 +195,8 @@ async def create_import_batch(
 
 
 async def _create_import_batch(
-    session: AsyncSession, raw_input: str
+    session: AsyncSession,
+    raw_input: str,
 ) -> tuple[ImportBatch, list[int], int]:
     if await _security_cleanup_required(session):
         raise PublicLinkError("security_cleanup_required")
@@ -227,9 +235,7 @@ async def _create_import_batch(
     ).all()
     previous_urls = {str(row.normalized_url) for row in previous_previews}
     previous_work_ids = {
-        str(row.platform_work_id)
-        for row in previous_previews
-        if row.platform_work_id
+        str(row.platform_work_id) for row in previous_previews if row.platform_work_id
     }
     seen: set[str] = set()
     duplicate_count = 0
@@ -243,8 +249,7 @@ async def _create_import_batch(
             normalized = normalize_input_url(input_url)
         except PublicLinkError as exc:
             normalized = (
-                "invalid:"
-                f"{hashlib.sha256(input_url.encode()).hexdigest()[:16]}"
+                "invalid:" f"{hashlib.sha256(input_url.encode()).hexdigest()[:16]}"
             )
             identity = normalized
             status = "failed"
@@ -327,6 +332,13 @@ async def _create_import_batch(
             status=status,
             error_code=error_code,
             error_message=error_message,
+            raw_metadata={
+                "import_provenance": {
+                    "source_type": "link",
+                    "rights_attested": False,
+                    "attested_at": None,
+                }
+            },
         )
         session.add(item)
         await session.flush()
@@ -385,6 +397,7 @@ async def _refresh_batch(session: AsyncSession, batch_id: str) -> None:
             {
                 "completed": completed,
                 "ready": counts.get("ready", 0),
+                "confirmed": counts.get("confirmed", 0),
                 "needs_local_file": counts.get("needs_local_file", 0),
                 "duplicates": counts.get("duplicate", 0) + deduplicated_count,
                 "failed": failed,
@@ -402,7 +415,6 @@ async def _refresh_batch(session: AsyncSession, batch_id: str) -> None:
         if job:
             job.state = batch.state
         return
-    batch.completed_at = utcnow()
     if batch.cancel_requested:
         batch.state = "cancelled"
     elif counts.get("blocked", 0):
@@ -411,6 +423,7 @@ async def _refresh_batch(session: AsyncSession, batch_id: str) -> None:
         batch.state = "partial"
     else:
         batch.state = "succeeded"
+    batch.completed_at = utcnow()
     if job:
         job.state = batch.state
         job.completed_at = utcnow()
@@ -425,7 +438,7 @@ async def cancel_import_batch(session: AsyncSession, batch_id: str) -> ImportBat
     batch = await session.get(ImportBatch, batch_id)
     if not batch:
         raise LookupError("导入批次不存在")
-    if batch.state not in {"queued", "running", "cancelling"}:
+    if batch.state not in {"queued", "running", "cancelling", "automating"}:
         return batch
     batch.cancel_requested = True
     batch.state = "cancelling"
@@ -496,6 +509,7 @@ async def batch_view(session: AsyncSession, batch_id: str) -> dict:
     return {
         "id": batch.id,
         "job_id": batch.job_id,
+        "source_type": batch.source_type,
         "state": batch.state,
         "total_items": batch.total_items,
         "cancel_requested": batch.cancel_requested,
@@ -512,6 +526,9 @@ async def batch_view(session: AsyncSession, batch_id: str) -> dict:
             {
                 "id": item.id,
                 "ordinal": item.ordinal,
+                "platform": item.platform,
+                "client_item_id": item.client_item_id,
+                "target_collection_id": item.target_collection_id,
                 "input_url": item.input_url,
                 "normalized_url": item.normalized_url,
                 "canonical_url": item.canonical_url,
@@ -622,6 +639,8 @@ async def _confirm_import_items(
     batch_id: str,
     item_ids: list[int],
     collection_ids: dict[int, int] | None = None,
+    *,
+    commit: bool = True,
 ) -> dict:
     requested = set(int(item) for item in item_ids)
     requested_collections = {
@@ -644,21 +663,28 @@ async def _confirm_import_items(
     )
     if not items:
         raise ValueError("请选择至少一个已解析或已补件的作品")
+    batch = await session.get(ImportBatch, batch_id)
+    if not batch:
+        raise LookupError("导入批次不存在")
+    stored_collection_ids = {
+        int(item.target_collection_id)
+        for item in items
+        if item.target_collection_id is not None
+    }
+    all_collection_ids = set(requested_collections.values()) | stored_collection_ids
     collection_map = {
         group.id: group
         for group in (
             (
                 await session.execute(
-                    select(Collection).where(
-                        Collection.id.in_(set(requested_collections.values()))
-                    )
+                    select(Collection).where(Collection.id.in_(all_collection_ids))
                 )
             )
             .scalars()
             .all()
         )
     }
-    missing_collections = set(requested_collections.values()) - set(collection_map)
+    missing_collections = all_collection_ids - set(collection_map)
     if missing_collections:
         raise ValueError("所选收藏夹不存在，请刷新收藏夹后重试")
     manual_group = (
@@ -671,68 +697,122 @@ async def _confirm_import_items(
         session.add(manual_group)
         await session.flush()
 
-    work_ids: list[int] = []
-    for item in items:
-        assets = (
-            (
-                await session.execute(
-                    select(WorkSourceAsset).where(
-                        WorkSourceAsset.import_item_id == item.id
-                    )
-                )
+    assets_by_item: dict[int, list[WorkSourceAsset]] = {
+        int(item.id): [] for item in items
+    }
+    assets = (
+        (
+            await session.execute(
+                select(WorkSourceAsset)
+                .where(WorkSourceAsset.import_item_id.in_(assets_by_item))
+                .order_by(WorkSourceAsset.import_item_id, WorkSourceAsset.position)
             )
-            .scalars()
-            .all()
         )
-        if item.status == "needs_local_file" and not assets:
-            continue
+        .scalars()
+        .all()
+    )
+    for asset in assets:
+        if asset.import_item_id is not None:
+            assets_by_item.setdefault(int(asset.import_item_id), []).append(asset)
+
+    identity_by_item: dict[int, tuple[str, str]] = {}
+    target_collection_by_item: dict[int, int] = {}
+    for item in items:
         platform_work_id = item.platform_work_id or (
             "local-" + hashlib.sha256(item.normalized_url.encode()).hexdigest()[:32]
         )
-        target_group = collection_map.get(
-            requested_collections.get(item.id, manual_group.id),
-            manual_group,
+        identity_by_item[int(item.id)] = (item.platform or "douyin", platform_work_id)
+        target_collection_by_item[int(item.id)] = requested_collections.get(
+            item.id, item.target_collection_id or manual_group.id
         )
-        work = (
+    platform_work_ids = {identity[1] for identity in identity_by_item.values()}
+    existing_works = (
+        (
             await session.execute(
-                select(Work).where(
-                    Work.platform == "douyin",
-                    Work.platform_work_id == platform_work_id,
+                select(Work).where(Work.platform_work_id.in_(platform_work_ids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    work_by_identity = {
+        (str(work.platform), str(work.platform_work_id)): work for work in existing_works
+    }
+    existing_work_ids = {int(work.id) for work in existing_works}
+    target_collection_ids = set(target_collection_by_item.values()) | {manual_group.id}
+    membership_pairs = {
+        (int(collection_id), int(work_id))
+        for collection_id, work_id in (
+            await session.execute(
+                select(
+                    CollectionMembership.collection_id,
+                    CollectionMembership.work_id,
+                ).where(
+                    CollectionMembership.collection_id.in_(target_collection_ids),
+                    CollectionMembership.work_id.in_(existing_work_ids),
                 )
             )
-        ).scalar_one_or_none()
+        ).all()
+    }
+
+    work_ids: list[int] = []
+    for item in items:
+        assets = assets_by_item[int(item.id)]
+        if batch.source_type != "link" and not any(
+            asset.kind == "video" and Path(asset.path).is_file() for asset in assets
+        ):
+            item.status = "needs_local_file"
+            item.error_code = "missing_video"
+            item.error_message = "已上传视频不存在，请重新上传"
+            continue
+        if item.status == "needs_local_file" and not assets:
+            continue
+        platform, platform_work_id = identity_by_item[int(item.id)]
+        target_collection_id = target_collection_by_item[int(item.id)]
+        target_group = collection_map.get(target_collection_id, manual_group)
+        work = work_by_identity.get((platform, platform_work_id))
         if work:
-            if work.library_state not in {"pending", "issues"}:
-                item.status = "duplicate"
-                item.error_code = "already_imported"
-                item.error_message = ERROR_MESSAGES["already_imported"]
-                item.existing_work_id = work.id
-                continue
-            membership = await session.scalar(
-                select(CollectionMembership.id).where(
-                    CollectionMembership.collection_id == target_group.id,
-                    CollectionMembership.work_id == work.id,
-                )
-            )
-            if not membership:
+            membership_key = (int(target_group.id), int(work.id))
+            if membership_key not in membership_pairs:
                 session.add(
                     CollectionMembership(
                         collection_id=target_group.id,
                         work_id=work.id,
                     )
                 )
+                membership_pairs.add(membership_key)
             for asset in assets:
                 asset.work_id = work.id
-            item.status = "confirmed"
-            item.error_code = None
-            item.error_message = None
-            item.confirmed_at = utcnow()
+            if batch.source_type != "link" or work.library_state not in {
+                "pending",
+                "issues",
+            }:
+                item.status = "duplicate"
+                item.error_code = "already_imported"
+                item.error_message = ERROR_MESSAGES["already_imported"]
+            else:
+                item.status = "confirmed"
+                item.error_code = None
+                item.error_message = None
+                item.confirmed_at = utcnow()
             item.existing_work_id = work.id
             if work.id not in work_ids:
                 work_ids.append(work.id)
             continue
+        published_at = None
+        external_metadata = dict((item.raw_metadata or {}).get("external_import") or {})
+        published_value = external_metadata.get("published_at")
+        if isinstance(published_value, datetime):
+            published_at = published_value
+        elif isinstance(published_value, str) and published_value:
+            try:
+                published_at = datetime.fromisoformat(
+                    published_value.replace("Z", "+00:00")
+                )
+            except ValueError:
+                published_at = None
         work = Work(
-            platform="douyin",
+            platform=platform,
             platform_work_id=platform_work_id,
             kind=item.kind or ("image" if len(assets) > 1 else "video"),
             title=item.title or f"本地补件 {platform_work_id[-8:]}",
@@ -741,12 +821,19 @@ async def _confirm_import_items(
             author_name=item.author_name,
             duration_seconds=item.duration_seconds,
             cover_url=item.cover_url,
-            source_url=item.canonical_url or item.input_url,
+            source_url=(
+                None
+                if item.platform == "local"
+                else item.canonical_url or item.input_url
+            ),
             media_urls=list(item.media_urls or []),
             image_urls=list(item.image_urls or []),
             raw_metadata=dict(item.raw_metadata or {}),
+            import_source=batch.source_type,
+            refresh_policy="f2" if batch.source_type == "link" else "never",
             library_state="pending",
             processing_state="discovered",
+            published_at=published_at,
         )
         session.add(work)
         await session.flush()
@@ -763,12 +850,40 @@ async def _confirm_import_items(
     if not work_ids:
         raise ValueError("所选作品均已存在或仍缺少本地补件")
     await session.flush()
-    await session.commit()
+    if commit:
+        await session.commit()
     return {
         "confirmed_count": len(work_ids),
         "work_ids": work_ids,
         "library_state": "pending",
     }
+
+
+async def _fail_preview_item(
+    item_id: int,
+    batch_id: str,
+    *,
+    code: str,
+    message: str,
+    opens_circuit: bool = False,
+) -> None:
+    async with async_session_factory() as session:
+        item = await session.get(ImportItem, item_id)
+        if not item or item.status not in ACTIVE_ITEM_STATES:
+            return
+        item.status = "failed"
+        item.error_code = code
+        item.error_message = message
+        item.worker_id = None
+        if opens_circuit:
+            await _mark_batch_blocked(
+                session,
+                batch_id,
+                code=code,
+                message=message,
+            )
+        await _refresh_batch(session, batch_id)
+        await session.commit()
 
 
 class ImportCoordinator:
@@ -777,14 +892,33 @@ class ImportCoordinator:
         self.client = client or F2WorkClient()
         self.queue: asyncio.Queue[int | None] = asyncio.Queue(maxsize=90)
         self.tasks: list[asyncio.Task] = []
+        self.last_error: str | None = None
+
+    def health_snapshot(self) -> dict[str, object]:
+        alive_tasks = [task for task in self.tasks if not task.done()]
+        for task in self.tasks:
+            if task.done() and not task.cancelled():
+                error = task.exception()
+                if error is not None:
+                    self.last_error = safe_error_message(error)
+        return {
+            "name": "link_preview",
+            "alive": len(alive_tasks) == self.worker_count,
+            "workers_alive": len(alive_tasks),
+            "workers_expected": self.worker_count,
+            "last_error": self.last_error,
+        }
 
     async def start(self) -> None:
+        self.last_error = None
         async with async_session_factory() as session:
             active_batches = (
                 (
                     await session.execute(
                         select(ImportBatch).where(
-                            ImportBatch.state.in_({"queued", "running", "cancelling"})
+                            ImportBatch.state.in_(
+                                {"queued", "running", "cancelling", "automating"}
+                            )
                         )
                     )
                 )
@@ -792,6 +926,7 @@ class ImportCoordinator:
                 .all()
             )
             for batch in active_batches:
+                job = await session.get(Job, batch.job_id)
                 batch.cancel_requested = True
                 batch.state = "cancelled"
                 batch.completed_at = utcnow()
@@ -803,11 +938,11 @@ class ImportCoordinator:
                     )
                     .values(
                         status="cancelled",
+                        worker_id=None,
                         error_code="cancelled_by_user",
                         error_message="应用重启后不会自动恢复作品链接访问",
                     )
                 )
-                job = await session.get(Job, batch.job_id)
                 if job:
                     job.state = "cancelled"
                     job.completed_at = utcnow()
@@ -833,11 +968,24 @@ class ImportCoordinator:
         ]
 
     async def stop(self) -> None:
-        for _ in self.tasks:
-            await self.queue.put(None)
-        if self.tasks:
-            await asyncio.gather(*self.tasks)
+        tasks = list(self.tasks)
         self.tasks = []
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True), timeout=5
+                )
+            except TimeoutError:
+                logger.error("链接预检 worker 未能在 5 秒内停止")
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self.queue.task_done()
 
     async def enqueue(self, item_ids: list[int]) -> None:
         for item_id in item_ids:
@@ -849,11 +997,46 @@ class ImportCoordinator:
             try:
                 if item_id is None:
                     return
-                await self._process_item(item_id, worker_id)
+                try:
+                    await self._process_item(item_id, worker_id)
+                except Exception as exc:
+                    self.last_error = safe_error_message(exc)
+                    # A single malformed response or transient database error
+                    # must not terminate one of the three persistent workers.
+                    logger.exception(
+                        "链接预检 worker {} 处理条目 {} 时失败",
+                        worker_id,
+                        item_id,
+                    )
             finally:
                 self.queue.task_done()
 
     async def _process_item(self, item_id: int, worker_id: int) -> None:
+        async with async_session_factory() as session:
+            item = await session.get(ImportItem, item_id)
+            if not item:
+                return
+            batch_id = item.batch_id
+        try:
+            await self._process_item_inner(item_id, worker_id)
+        except SecretUnavailableError:
+            await _fail_preview_item(
+                item_id,
+                batch_id,
+                code="f2_cookie_unreadable",
+                message="F2 Cookie 无法解密，请在设置中重新保存",
+            )
+        except Exception as exc:
+            self.last_error = safe_error_message(exc)
+            logger.exception("链接预检条目发生未知错误: {}", item_id)
+            await _fail_preview_item(
+                item_id,
+                batch_id,
+                code="preview_internal_error",
+                message="链接解析发生内部错误，请稍后重试",
+            )
+
+    async def _process_item_inner(self, item_id: int, worker_id: int) -> None:
         async with async_session_factory() as session:
             item = await session.get(ImportItem, item_id)
             if not item:
@@ -942,7 +1125,20 @@ class ImportCoordinator:
                     item.cover_url = result.cover_url
                     item.media_urls = result.media_urls
                     item.image_urls = result.image_urls
-                    item.raw_metadata = result.raw_metadata
+                    resolved_metadata = dict(result.raw_metadata or {})
+                    resolved_metadata.pop("import_provenance", None)
+                    previous_metadata = (
+                        dict(item.raw_metadata or {})
+                        if isinstance(item.raw_metadata, dict)
+                        else {}
+                    )
+                    provenance = previous_metadata.get("import_provenance")
+                    if isinstance(provenance, dict):
+                        # F2 owns discovery metadata, while provenance is a
+                        # controlled local attestation and must never be
+                        # overwritten by an upstream response.
+                        resolved_metadata["import_provenance"] = dict(provenance)
+                    item.raw_metadata = resolved_metadata
                     item.worker_id = None
                     if existing:
                         item.status = "duplicate"

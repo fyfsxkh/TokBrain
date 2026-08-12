@@ -1,0 +1,5 @@
+# Optional official Alibaba Cloud bill reconciliation.
+# scripts/setup.ps1 installs this by default; pass -WithoutBilling for a lean
+# local runtime that does not use the bill-reconciliation page.
+alibabacloud-bssopenapi20171214==5.1.1
+alibabacloud-tea-openapi==0.4.5

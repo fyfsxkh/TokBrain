@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -10,7 +10,7 @@ import { markdownToPlainText, normalizeMathMarkdown } from "../lib/markdown";
 
 export type AnswerFormat = "rich" | "markdown" | "plain";
 
-export function MarkdownContent({ content }: { content: string }) {
+export const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
   const normalized = useMemo(() => normalizeMathMarkdown(content), [content]);
   return (
     <div className="markdown-content">
@@ -25,9 +25,9 @@ export function MarkdownContent({ content }: { content: string }) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-export function AnswerBlock({ content, initialFormat }: { content: string; initialFormat: AnswerFormat }) {
+export const AnswerBlock = memo(function AnswerBlock({ content, initialFormat }: { content: string; initialFormat: AnswerFormat }) {
   const [format, setFormat] = useState<AnswerFormat>(initialFormat);
   const [copied, setCopied] = useState(false);
   const richRef = useRef<HTMLDivElement>(null);
@@ -52,9 +52,9 @@ export function AnswerBlock({ content, initialFormat }: { content: string; initi
   return (
     <div className="answer-block">
       <div className="answer-toolbar">
-        <div className="format-switch" aria-label="回答显示格式">
+        <div className="format-switch" role="group" aria-label="回答显示格式">
           {(["rich", "markdown", "plain"] as AnswerFormat[]).map((value) => (
-            <button type="button" key={value} className={format === value ? "active" : ""} onClick={() => setFormat(value)}>
+            <button type="button" key={value} aria-pressed={format === value} className={format === value ? "active" : ""} onClick={() => setFormat(value)}>
               {value === "rich" ? "阅读排版" : value === "markdown" ? "Markdown" : "纯文本"}
             </button>
           ))}
@@ -62,8 +62,8 @@ export function AnswerBlock({ content, initialFormat }: { content: string; initi
         <button type="button" className="copy-answer" onClick={copyCurrent}>{copied ? "已复制" : "复制当前格式"}</button>
       </div>
       {format === "rich" ? <div ref={richRef}><MarkdownContent content={content} /></div> :
-        format === "markdown" ? <div className="markdown-preview"><MarkdownContent content={content} /></div> :
+        format === "markdown" ? <pre className="markdown-source"><code>{content}</code></pre> :
           <div className="plain-answer">{plain}</div>}
     </div>
   );
-}
+});

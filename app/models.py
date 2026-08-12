@@ -56,7 +56,9 @@ class Collection(Base):
     cover_url: Mapped[str | None] = mapped_column(Text)
     summary_prompt: Mapped[str | None] = mapped_column(Text)
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -78,6 +80,12 @@ class Work(Base):
     media_urls: Mapped[list] = mapped_column(JSON, default=list)
     image_urls: Mapped[list] = mapped_column(JSON, default=list)
     raw_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    import_source: Mapped[str] = mapped_column(
+        String(20), default="link", server_default="link"
+    )
+    refresh_policy: Mapped[str] = mapped_column(
+        String(20), default="f2", server_default="f2"
+    )
     content_text: Mapped[str] = mapped_column(Text, default="")
     library_state: Mapped[str] = mapped_column(
         String(20), default="pending", index=True
@@ -85,6 +93,14 @@ class Work(Base):
     processing_state: Mapped[str] = mapped_column(
         String(30), default="discovered", index=True
     )
+    supplement_state: Mapped[str] = mapped_column(
+        String(20), default="none", server_default="none", index=True
+    )
+    supplement_reason: Mapped[str | None] = mapped_column(String(80))
+    evidence_state: Mapped[str] = mapped_column(
+        String(20), default="unverified", server_default="unverified", index=True
+    )
+    track_report: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     process_error: Mapped[str | None] = mapped_column(Text)
     last_error_code: Mapped[str | None] = mapped_column(String(50), index=True)
     process_attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -93,7 +109,9 @@ class Work(Base):
         DateTime(timezone=True), default=utcnow, index=True
     )
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
@@ -111,7 +129,9 @@ class CollectionMembership(Base):
     work_id: Mapped[int] = mapped_column(
         ForeignKey("works.id", ondelete="CASCADE"), index=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     __table_args__ = (
         UniqueConstraint("collection_id", "work_id", name="uq_membership"),
     )
@@ -131,7 +151,9 @@ class Job(Base):
     deferred_items: Mapped[int] = mapped_column(Integer, default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     message: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
@@ -146,12 +168,19 @@ class ImportBatch(Base):
         ForeignKey("jobs.id", ondelete="CASCADE"), unique=True, index=True
     )
     raw_input: Mapped[str] = mapped_column(Text)
+    source_type: Mapped[str] = mapped_column(
+        String(20), default="link", server_default="link"
+    )
+    idempotency_key_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    request_digest: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(20), default="queued", index=True)
     total_items: Mapped[int] = mapped_column(Integer, default=0)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     error_code: Mapped[str | None] = mapped_column(String(50))
     error_message: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -163,6 +192,13 @@ class ImportItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     batch_id: Mapped[str] = mapped_column(
         ForeignKey("import_batches.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[str] = mapped_column(
+        String(20), default="douyin", server_default="douyin"
+    )
+    client_item_id: Mapped[str | None] = mapped_column(String(200))
+    target_collection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("collections.id", ondelete="SET NULL"), index=True
     )
     ordinal: Mapped[int] = mapped_column(Integer)
     input_url: Mapped[str] = mapped_column(Text)
@@ -187,9 +223,50 @@ class ImportItem(Base):
     )
     worker_id: Mapped[int | None] = mapped_column(Integer)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id", "client_item_id", name="uq_import_item_batch_client_id"
+        ),
+    )
+
+
+class PackageImportFile(Base):
+    """One browser-selected file staged for a package import batch."""
+
+    __tablename__ = "package_import_files"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), index=True
+    )
+    client_file_id: Mapped[str] = mapped_column(String(100))
+    relative_path: Mapped[str] = mapped_column(Text)
+    path_hash: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(20), default="unknown")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    declared_size: Mapped[int] = mapped_column(Integer, default=0)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    stored_path: Mapped[str | None] = mapped_column(Text)
+    error_code: Mapped[str | None] = mapped_column(String(50))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "batch_id", "client_file_id", name="uq_package_file_batch_client_id"
+        ),
+        UniqueConstraint("batch_id", "path_hash", name="uq_package_file_batch_path"),
     )
 
 
@@ -217,7 +294,9 @@ class WorkSourceAsset(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
 
 
 class UsageEvent(Base):
@@ -263,7 +342,16 @@ class Keyframe(Base):
     scene_score: Mapped[float] = mapped_column(Float, default=0)
     path: Mapped[str] = mapped_column(Text)
     perceptual_hash: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    candidate_source: Mapped[str] = mapped_column(
+        String(30), default="scene", server_default="scene"
+    )
+    selection_score: Mapped[float] = mapped_column(Float, default=0, server_default="0")
+    selection_reason: Mapped[str | None] = mapped_column(Text)
+    ocr_text: Mapped[str | None] = mapped_column(Text)
+    visual_description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
 
 
 class KnowledgeChunk(Base):
@@ -278,10 +366,10 @@ class KnowledgeChunk(Base):
     start_seconds: Mapped[float | None] = mapped_column(Float)
     end_seconds: Mapped[float | None] = mapped_column(Float)
     embedding: Mapped[list | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    __table_args__ = (
-        UniqueConstraint("work_id", "chunk_index", name="uq_work_chunk"),
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
     )
+    __table_args__ = (UniqueConstraint("work_id", "chunk_index", name="uq_work_chunk"),)
 
 
 class WorkSummary(Base):
@@ -300,7 +388,9 @@ class WorkSummary(Base):
     source_digest: Mapped[str] = mapped_column(String(64), default="")
     error: Mapped[str | None] = mapped_column(Text)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

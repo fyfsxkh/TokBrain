@@ -1,35 +1,10 @@
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import app.services.content_pipeline as pipeline
-from app.services.content_pipeline import _ocr_many
 from app.services.providers import ProviderUsage, asr_audio_command
-
-
-class FakeOcrProvider:
-    def __init__(self) -> None:
-        self.active = 0
-        self.peak = 0
-
-    async def ocr_image(self, image_path: Path):
-        self.active += 1
-        self.peak = max(self.peak, self.active)
-        await asyncio.sleep(0.01)
-        self.active -= 1
-        return image_path.stem, ProviderUsage("fake-ocr", 1, 1, 0, quantity=2)
-
-
-async def test_ocr_many_is_bounded_concurrent_and_keeps_order():
-    provider = FakeOcrProvider()
-    inputs = [(Path(f"frame-{index}.jpg"), float(index)) for index in range(7)]
-
-    results = await _ocr_many(provider, inputs, concurrency=3)  # type: ignore[arg-type]
-
-    assert 1 < provider.peak <= 3
-    assert [result[0] for result in results] == [f"frame-{index}" for index in range(7)]
-    assert [result[2] for result in results] == [float(index) for index in range(7)]
-    assert all(result[3] is None for result in results)
 
 
 def test_asr_audio_is_downsampled_and_compressed_for_upload():
@@ -109,9 +84,19 @@ async def test_remote_pipeline_finishes_before_database_writes(monkeypatch):
         title="标题",
         description="内容",
         author_name="作者",
-        kind="metadata",
+        kind="video",
         media_urls=[],
         image_urls=[],
+        raw_metadata={
+            "media_policy": {
+                "download_permission": "denied",
+                "processing_mode": "subtitle_or_audio",
+                "subtitle_texts": [
+                    "这是一段来自原始字幕的有效内容，用于验证所有远程模型调用结束之后才开始写入数据库，"
+                    "并确认字幕、总结与向量处理都严格遵守既定顺序。"
+                ],
+            }
+        },
         duration_seconds=0,
         processing_state="discovered",
         process_error=None,
@@ -123,6 +108,8 @@ async def test_remote_pipeline_finishes_before_database_writes(monkeypatch):
 
     assert result == "processed"
     assert remote_done
+    assert work.evidence_state == "sufficient"
+    assert work.supplement_state == "required"
 
 
 async def test_restricted_pipeline_prefers_inline_subtitles_without_media_fetch(
@@ -197,6 +184,33 @@ async def test_restricted_pipeline_downloads_audio_only_for_asr(tmp_path, monkey
     assert seen and not seen[0].exists()
 
 
+async def test_restricted_asr_failure_is_not_misclassified_as_missing_evidence(
+    tmp_path, monkeypatch
+):
+    async def fake_download(_urls, target, **_kwargs):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"audio")
+        return target
+
+    class Provider:
+        async def transcribe(self, *_args, **_kwargs):
+            raise RuntimeError("ASR provider unavailable")
+
+    monkeypatch.setattr(pipeline, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(pipeline.shutil, "which", lambda _name: "ffmpeg")
+    monkeypatch.setattr(pipeline, "_download_first", fake_download)
+
+    with pytest.raises(RuntimeError, match="ASR provider unavailable"):
+        await pipeline._restricted_text_or_audio(
+            Provider(),  # type: ignore[arg-type]
+            SimpleNamespace(
+                platform_work_id="restricted-asr-error",
+                duration_seconds=20,
+            ),
+            {"audio_urls": ["https://v3-web.douyinvod.com/audio.m4a"]},
+        )
+
+
 async def test_denied_policy_ignores_stale_full_video_url(monkeypatch):
     async def forbidden(*_args, **_kwargs):
         raise AssertionError(
@@ -253,7 +267,6 @@ async def test_denied_policy_ignores_stale_full_video_url(monkeypatch):
     monkeypatch.setattr(pipeline, "get_runtime_settings", fake_runtime)
     monkeypatch.setattr(pipeline, "DashScopeProvider", lambda _api_key: Provider())
     monkeypatch.setattr(pipeline, "_download_first", forbidden)
-    monkeypatch.setattr(pipeline, "extract_keyframes", forbidden)
     monkeypatch.setattr(pipeline, "_record", no_write)
     monkeypatch.setattr(pipeline, "store_summary", no_write)
     monkeypatch.setattr(pipeline, "_replace_chunks", no_write)
@@ -283,5 +296,7 @@ async def test_denied_policy_ignores_stale_full_video_url(monkeypatch):
         FakeSession(), work, "job-denied"  # type: ignore[arg-type]
     )
 
-    assert result == "processed"
-    assert "[metadata]" in work.content_text
+    assert result == "evidence_insufficient"
+    assert work.content_text == ""
+    assert work.evidence_state == "insufficient"
+    assert work.supplement_state == "required"

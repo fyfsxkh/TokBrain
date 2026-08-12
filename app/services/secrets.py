@@ -92,10 +92,6 @@ async def get_secret(session: AsyncSession, name: str) -> str | None:
     return unprotect_text(record.encrypted_value)
 
 
-async def has_secret(session: AsyncSession, name: str) -> bool:
-    return await session.get(SecretRecord, name) is not None
-
-
 async def has_readable_secret(session: AsyncSession, name: str) -> bool:
     """Report only secrets that the current Windows security context can decrypt."""
 

@@ -1,21 +1,42 @@
 import type * as Contract from "./contracts";
+import {
+  parseChatStreamEvent,
+  parseCollections,
+  parseHealth,
+  parseImportBatch,
+  parseJobs,
+  parseProbe,
+  parseRuntimeSettings,
+  parseWorksPage,
+  parseWorkSummaryDetail,
+} from "./contractGuards";
 
 export type {
-  ChatAnswer,
   ChatSource,
   ChatStreamEvent,
   ChatTurn,
   Collection,
   Health,
   ImportBatch,
+  ImportBatchCreated,
+  ImportBatchCreateRequest,
   ImportItem,
+  ImportItemUpdate,
+  ImportItemUpdateResult,
+  IntegrationTokenCreated,
+  IntegrationTokenStatus,
   Job,
   LibrarySummary,
+  LocalImportBatchRequest,
+  LocalVideoUploadResult,
+  PackageImportBatchRequest,
   ObsidianManifest,
   Probe,
   RuntimeSettings,
+  RuntimeSettingsUpdate,
   Usage,
   Work,
+  WorkSupplementResult,
   WorksPage,
   WorkSummaryDetail,
 } from "./contracts";
@@ -25,6 +46,9 @@ export const API_BASE =
 
 const LOCAL_REQUEST_HEADER = "tokbrain-local";
 const GET_RETRY_DELAY_MS = 300;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const UPLOAD_REQUEST_TIMEOUT_MS = 30 * 60_000;
+const STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
 
 export class ApiError extends Error {
   constructor(
@@ -43,6 +67,22 @@ function messageFromPayload(payload: unknown, fallback: string): string {
     message?: unknown;
   };
   if (typeof body.detail === "string") return body.detail;
+  if (Array.isArray(body.detail)) {
+    const first = body.detail.find((item) => item && typeof item === "object") as
+      | { msg?: unknown; message?: unknown; loc?: unknown }
+      | undefined;
+    const message = typeof first?.message === "string"
+      ? first.message
+      : typeof first?.msg === "string"
+        ? first.msg
+        : "";
+    if (message) {
+      const location = Array.isArray(first?.loc)
+        ? first.loc.filter((item) => !["body", "query", "path", "header"].includes(String(item))).join(".")
+        : "";
+      return location ? `${location}：${message}` : message;
+    }
+  }
   if (body.detail && typeof body.detail === "object") {
     const detail = body.detail as { message?: unknown; code?: unknown };
     if (typeof detail.message === "string") return detail.message;
@@ -75,36 +115,69 @@ class LocalApiClient {
     return `${this.baseUrl}${path}`;
   }
 
+  private async fetchOnce(
+    path: string,
+    options: RequestInit,
+    timeoutMs: number,
+  ): Promise<Response> {
+    if (!timeoutMs) return fetch(this.endpoint(path), options);
+    const controller = new AbortController();
+    const forwardAbort = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) forwardAbort();
+    else options.signal?.addEventListener("abort", forwardAbort, { once: true });
+    const timer = window.setTimeout(
+      () => controller.abort(new DOMException("请求超时", "TimeoutError")),
+      timeoutMs,
+    );
+    try {
+      return await fetch(this.endpoint(path), { ...options, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+      options.signal?.removeEventListener("abort", forwardAbort);
+    }
+  }
+
   private async fetchWithSafeRetry(
     path: string,
     init: RequestInit,
+    timeoutMs: number,
   ): Promise<Response> {
     const options = requestOptions(init);
     const method = (options.method || "GET").toUpperCase();
     try {
-      return await fetch(this.endpoint(path), options);
-    } catch {
+      return await this.fetchOnce(path, options, timeoutMs);
+    } catch (cause) {
+      if (options.signal?.aborted) throw cause;
       if (method !== "GET") {
         throw new ApiError(
           0,
-          "本机后端未响应，请刷新确认后再重试，避免重复提交",
+          cause instanceof DOMException && cause.name === "TimeoutError"
+            ? "请求本机后端超时，请刷新确认结果后再重试，避免重复提交"
+            : "本机后端未响应，请刷新确认后再重试，避免重复提交",
         );
       }
     }
 
     await wait(GET_RETRY_DELAY_MS);
     try {
-      return await fetch(this.endpoint(path), options);
-    } catch {
-      throw new ApiError(0, "无法连接本机后端，请确认服务仍在运行");
+      return await this.fetchOnce(path, options, timeoutMs);
+    } catch (cause) {
+      if (options.signal?.aborted) throw cause;
+      throw new ApiError(
+        0,
+        cause instanceof DOMException && cause.name === "TimeoutError"
+          ? "请求本机后端超时，请确认服务仍在运行"
+          : "无法连接本机后端，请确认服务仍在运行",
+      );
     }
   }
 
   private async request<T>(
     path: string,
     init: RequestInit = {},
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    const response = await this.fetchWithSafeRetry(path, init);
+    const response = await this.fetchWithSafeRetry(path, init, timeoutMs);
     const payload = await parsedBody(response);
     if (!response.ok) {
       throw new ApiError(
@@ -116,28 +189,28 @@ class LocalApiClient {
   }
 
   health(): Promise<Contract.Health> {
-    return this.request("/api/system-health");
+    return this.request<unknown>("/api/system-health").then(parseHealth);
   }
 
   healthProbe(probe: string): Promise<Contract.Probe> {
-    return this.request(`/api/system-health/probes/${encodeURIComponent(probe)}`);
+    return this.request<unknown>(`/api/system-health/probes/${encodeURIComponent(probe)}`).then(parseProbe);
   }
 
   settings(): Promise<Contract.RuntimeSettings> {
-    return this.request("/api/settings");
+    return this.request<unknown>("/api/settings").then(parseRuntimeSettings);
   }
 
   saveSettings(
-    body: Record<string, unknown>,
+    body: Contract.RuntimeSettingsUpdate,
   ): Promise<Contract.RuntimeSettings> {
-    return this.request("/api/settings", {
+    return this.request<unknown>("/api/settings", {
       method: "PUT",
       body: JSON.stringify(body),
-    });
+    }).then(parseRuntimeSettings);
   }
 
   clearAllKeys(): Promise<Contract.RuntimeSettings> {
-    return this.request("/api/settings/secrets", { method: "DELETE" });
+    return this.request<unknown>("/api/settings/secrets", { method: "DELETE" }).then(parseRuntimeSettings);
   }
 
   usage(): Promise<Contract.Usage> {
@@ -150,28 +223,90 @@ class LocalApiClient {
     });
   }
 
-  createImportBatch(text: string): Promise<{
-    batch_id: string;
-    job_id: string;
-    accepted_count: number;
-    rejected_count: number;
-    queued_count: number;
-    duplicate_count: number;
-  }> {
+  createImportBatch(
+    body: Contract.ImportBatchCreateRequest,
+  ): Promise<Contract.ImportBatchCreated> {
     return this.request("/api/import-batches", {
       method: "POST",
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(body),
     });
   }
 
   importBatch(id: string): Promise<Contract.ImportBatch> {
-    return this.request(`/api/import-batches/${encodeURIComponent(id)}`);
+    return this.request<unknown>(`/api/import-batches/${encodeURIComponent(id)}`).then(parseImportBatch);
+  }
+
+  createLocalImportBatch(
+    body: Contract.LocalImportBatchRequest,
+  ): Promise<Contract.ImportBatch> {
+    return this.request<unknown>("/api/local-import-batches", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).then(parseImportBatch);
+  }
+
+  createPackageImportBatch(
+    body: Contract.PackageImportBatchRequest,
+  ): Promise<Contract.ImportBatch> {
+    return this.request<unknown>("/api/package-import-batches", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).then(parseImportBatch);
+  }
+
+  packageImportBatch(id: string): Promise<Contract.ImportBatch> {
+    return this.request<unknown>(`/api/package-import-batches/${encodeURIComponent(id)}`).then(parseImportBatch);
+  }
+
+  uploadPackageImportFile(
+    batchId: string,
+    fileId: string,
+    file: File,
+  ): Promise<{ status: string; sha256: string; idempotent: boolean }> {
+    const body = new FormData();
+    body.append("file", file);
+    return this.request<{ status: string; sha256: string; idempotent: boolean }>(
+      `/api/package-import-batches/${encodeURIComponent(batchId)}/files/${encodeURIComponent(fileId)}`,
+      { method: "PUT", body },
+      UPLOAD_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  analyzePackageImportBatch(id: string): Promise<Contract.ImportBatch> {
+    return this.request<unknown>(
+      `/api/package-import-batches/${encodeURIComponent(id)}/analyze`,
+      { method: "POST" },
+    ).then(parseImportBatch);
+  }
+
+  uploadLocalImportVideo(
+    batchId: string,
+    itemId: number,
+    file: File,
+  ): Promise<Contract.LocalVideoUploadResult> {
+    const body = new FormData();
+    body.append("file", file);
+    return this.request(
+      `/api/local-import-batches/${encodeURIComponent(batchId)}/items/${itemId}/video`,
+      { method: "PUT", body },
+      UPLOAD_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  updateImportItem(
+    itemId: number,
+    body: Contract.ImportItemUpdate,
+  ): Promise<Contract.ImportItemUpdateResult> {
+    return this.request(`/api/import-items/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
   }
 
   cancelImportBatch(id: string): Promise<Contract.ImportBatch> {
-    return this.request(`/api/import-batches/${encodeURIComponent(id)}/cancel`, {
+    return this.request<unknown>(`/api/import-batches/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
-    });
+    }).then(parseImportBatch);
   }
 
   confirmImportBatch(
@@ -202,19 +337,27 @@ class LocalApiClient {
     return this.request(`/api/import-items/${itemId}/assets`, {
       method: "POST",
       body,
-    });
+    }, UPLOAD_REQUEST_TIMEOUT_MS);
   }
 
   removeImportItem(itemId: number): Promise<Contract.ImportBatch> {
-    return this.request(`/api/import-items/${itemId}`, { method: "DELETE" });
+    return this.request<unknown>(`/api/import-items/${itemId}`, { method: "DELETE" }).then(parseImportBatch);
+  }
+
+  integrationToken(): Promise<Contract.IntegrationTokenStatus> {
+    return this.request("/api/settings/integration-token");
+  }
+
+  createIntegrationToken(): Promise<Contract.IntegrationTokenCreated> {
+    return this.request("/api/settings/integration-token", { method: "POST" });
+  }
+
+  revokeIntegrationToken(): Promise<Contract.IntegrationTokenStatus> {
+    return this.request("/api/settings/integration-token", { method: "DELETE" });
   }
 
   jobs(): Promise<Contract.Job[]> {
-    return this.request("/api/jobs");
-  }
-
-  job(id: string): Promise<Contract.Job> {
-    return this.request(`/api/jobs/${encodeURIComponent(id)}`);
+    return this.request<unknown>("/api/jobs").then(parseJobs);
   }
 
   cancelJob(id: string): Promise<Contract.Job> {
@@ -227,7 +370,7 @@ class LocalApiClient {
     items: Contract.Collection[];
     summary: Contract.LibrarySummary;
   }> {
-    return this.request("/api/library/collections");
+    return this.request<unknown>("/api/library/collections").then(parseCollections);
   }
 
   createCollection(title: string): Promise<Contract.Collection> {
@@ -240,7 +383,7 @@ class LocalApiClient {
   updateCollectionSummaryPrompt(
     collectionId: number,
     summaryPrompt: string | null,
-  ): Promise<Contract.Collection> {
+  ): Promise<Pick<Contract.Collection, "id" | "key" | "title" | "cover_url" | "summary_prompt">> {
     return this.request(`/api/library/collections/${collectionId}`, {
       method: "PUT",
       body: JSON.stringify({ summary_prompt: summaryPrompt }),
@@ -264,7 +407,7 @@ class LocalApiClient {
   }
 
   works(
-    state: "pending" | "in_library" | "issues" | "archived",
+    state: "pending" | "in_library" | "supplement" | "issues" | "archived",
     collectionId?: number,
     offset = 0,
   ): Promise<Contract.WorksPage> {
@@ -276,7 +419,20 @@ class LocalApiClient {
     if (collectionId !== undefined) {
       query.set("collection_id", String(collectionId));
     }
-    return this.request(`/api/library/works?${query}`);
+    return this.request<unknown>(`/api/library/works?${query}`).then(parseWorksPage);
+  }
+
+  uploadWorkSupplement(
+    id: number,
+    files: File[],
+  ): Promise<Contract.WorkSupplementResult> {
+    const body = new FormData();
+    body.append("rights_attested", "true");
+    for (const file of files) body.append("files", file, file.name);
+    return this.request(`/api/library/works/${id}/supplement`, {
+      method: "POST",
+      body,
+    }, UPLOAD_REQUEST_TIMEOUT_MS);
   }
 
   restore(id: number): Promise<unknown> {
@@ -294,17 +450,6 @@ class LocalApiClient {
     });
   }
 
-  retryBatch(body: {
-    work_ids?: number[];
-    error_code?: string;
-    collection_id?: number;
-  }): Promise<{ changed: number; model_called: boolean }> {
-    return this.request("/api/library/works/retry-batch", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-  }
-
   summarize(workIds: number[]): Promise<Contract.Job> {
     return this.request("/api/library/summaries/jobs", {
       method: "POST",
@@ -313,7 +458,7 @@ class LocalApiClient {
   }
 
   workSummary(id: number): Promise<Contract.WorkSummaryDetail> {
-    return this.request(`/api/library/works/${id}/summary`);
+    return this.request<unknown>(`/api/library/works/${id}/summary`).then(parseWorkSummaryDetail);
   }
 
   obsidianManifest(workIds: number[]): Promise<Contract.ObsidianManifest> {
@@ -321,21 +466,6 @@ class LocalApiClient {
       method: "POST",
       body: JSON.stringify({ work_ids: workIds }),
     });
-  }
-
-  workLocation(
-    id: number,
-    pageSize = 60,
-  ): Promise<{
-    work_id: number;
-    index: number;
-    offset: number;
-    page_size: number;
-    total: number;
-  }> {
-    return this.request(
-      `/api/library/works/${id}/location?page_size=${pageSize}`,
-    );
   }
 
   remove(id: number): Promise<unknown> {
@@ -349,12 +479,30 @@ class LocalApiClient {
     onEvent: (event: Contract.ChatStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<void> {
+    const controller = new AbortController();
+    let timedOut = false;
+    let inactivityTimer = 0;
+    const forwardAbort = () => controller.abort(signal?.reason);
+    const resetInactivityTimer = () => {
+      window.clearTimeout(inactivityTimer);
+      inactivityTimer = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort(new DOMException("回答流超时", "TimeoutError"));
+      }, STREAM_INACTIVITY_TIMEOUT_MS);
+    };
+    const cleanup = () => {
+      window.clearTimeout(inactivityTimer);
+      signal?.removeEventListener("abort", forwardAbort);
+    };
+    if (signal?.aborted) forwardAbort();
+    else signal?.addEventListener("abort", forwardAbort, { once: true });
+    resetInactivityTimer();
     let response: Response;
     try {
       response = await fetch(this.endpoint("/api/chat/ask/stream"), {
         method: "POST",
         cache: "no-store",
-        signal,
+        signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
           "X-Requested-With": LOCAL_REQUEST_HEADER,
@@ -367,6 +515,8 @@ class LocalApiClient {
         }),
       });
     } catch (reason) {
+      cleanup();
+      if (timedOut) throw new ApiError(0, "回答流等待超时，请重试");
       if (reason instanceof DOMException && reason.name === "AbortError") {
         throw reason;
       }
@@ -375,32 +525,42 @@ class LocalApiClient {
 
     if (!response.ok) {
       const payload = await parsedBody(response);
+      cleanup();
       throw new ApiError(
         response.status,
         messageFromPayload(payload, `请求失败 (${response.status})`),
       );
     }
     if (!response.body) {
+      cleanup();
       throw new ApiError(0, "浏览器无法读取流式回答");
     }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let pending = "";
-    while (true) {
-      const chunk = await reader.read();
-      pending += decoder.decode(chunk.value || new Uint8Array(), {
-        stream: !chunk.done,
-      });
-      const lines = pending.split("\n");
-      pending = lines.pop() || "";
-      for (const line of lines) {
-        if (line.trim()) onEvent(JSON.parse(line) as Contract.ChatStreamEvent);
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        resetInactivityTimer();
+        pending += decoder.decode(chunk.value || new Uint8Array(), {
+          stream: !chunk.done,
+        });
+        const lines = pending.split("\n");
+        pending = lines.pop() || "";
+        for (const line of lines) {
+          if (line.trim()) onEvent(parseChatStreamEvent(JSON.parse(line)));
+        }
+        if (chunk.done) break;
       }
-      if (chunk.done) break;
-    }
-    if (pending.trim()) {
-      onEvent(JSON.parse(pending) as Contract.ChatStreamEvent);
+      if (pending.trim()) {
+        onEvent(parseChatStreamEvent(JSON.parse(pending)));
+      }
+    } catch (reason) {
+      if (timedOut) throw new ApiError(0, "回答流等待超时，请重试");
+      throw reason;
+    } finally {
+      cleanup();
     }
   }
 }

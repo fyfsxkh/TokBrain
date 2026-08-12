@@ -8,8 +8,19 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting, utcnow
+from app.services.import_queue import coordinator as import_coordinator
+from app.services.jobs import coordinator as job_coordinator
+from app.services.package_imports import coordinator as package_import_coordinator
 
-SYSTEM_PROBES = ("database", "media_runtime", "security_cleanup")
+SYSTEM_PROBES = ("database", "media_runtime", "coordinators", "security_cleanup")
+
+
+def coordinator_snapshots() -> list[dict[str, object]]:
+    return [
+        import_coordinator.health_snapshot(),
+        package_import_coordinator.health_snapshot(),
+        job_coordinator.health_snapshot(),
+    ]
 
 async def run_system_probe(session: AsyncSession, probe: str) -> dict:
     """Run one local-only probe so the UI can report genuine incremental progress."""
@@ -37,6 +48,34 @@ async def run_system_probe(session: AsyncSession, probe: str) -> dict:
             "status": "healthy" if ffmpeg else "degraded",
             "message": "音视频处理工具正常" if ffmpeg else "未检测到 ffmpeg，视频暂时无法入库",
             "details": {"available": bool(ffmpeg)},
+        }
+
+    if probe == "coordinators":
+        try:
+            snapshots = coordinator_snapshots()
+        except Exception as exc:
+            return {
+                "probe": probe,
+                "status": "down",
+                "message": "无法读取后台协调器状态",
+                "details": {"coordinators": [], "last_error": type(exc).__name__},
+            }
+        alive = all(bool(item.get("alive")) for item in snapshots)
+        has_error = any(bool(item.get("last_error")) for item in snapshots)
+        status = "down" if not alive else ("degraded" if has_error else "healthy")
+        return {
+            "probe": probe,
+            "status": status,
+            "message": (
+                "后台协调器正常"
+                if status == "healthy"
+                else (
+                    "后台协调器仍在运行，但最近发生过错误"
+                    if status == "degraded"
+                    else "一个或多个后台协调器已停止"
+                )
+            ),
+            "details": {"coordinators": snapshots},
         }
 
     if probe == "security_cleanup":

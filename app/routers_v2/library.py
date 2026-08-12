@@ -5,9 +5,9 @@ import uuid
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, desc, exists, func, select, update
+from sqlalchemy import and_, case, desc, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import DATA_DIR
@@ -16,6 +16,7 @@ from app.models import (
     Collection,
     CollectionMembership,
     ImportItem,
+    Job,
     KnowledgeChunk,
     Work,
     WorkSourceAsset,
@@ -30,8 +31,13 @@ from app.schemas import (
     ObsidianManifestRequest,
     RetryBatchRequest,
     SummaryCreate,
+    WorkSupplementUploadView,
 )
 from app.services.jobs import enqueue_ingest_job, enqueue_summary_job, job_to_dict
+from app.services.local_assets import (
+    LocalAssetError,
+    store_work_supplement,
+)
 from app.services.summaries import (
     local_asset_names,
     obsidian_asset_name,
@@ -53,21 +59,29 @@ def _safe_source_asset_path(value: str) -> Path | None:
     return path
 
 
-async def _local_cover_path(session: AsyncSession, work: Work) -> Path | None:
+async def _local_cover_path(
+    session: AsyncSession,
+    work: Work,
+    *,
+    source_images: list[WorkSourceAsset] | None = None,
+) -> Path | None:
     for name in local_asset_names(work):
         path = resolve_asset(work, name)
         if path:
             return path
-    source_images = (
-        await session.execute(
-            select(WorkSourceAsset)
-            .where(
-                WorkSourceAsset.work_id == work.id,
-                WorkSourceAsset.kind == "image",
-            )
-            .order_by(WorkSourceAsset.position, WorkSourceAsset.id)
+    if source_images is None:
+        source_images = list(
+            (
+                await session.execute(
+                    select(WorkSourceAsset)
+                    .where(
+                        WorkSourceAsset.work_id == work.id,
+                        WorkSourceAsset.kind == "image",
+                    )
+                    .order_by(WorkSourceAsset.position, WorkSourceAsset.id)
+                )
+            ).scalars()
         )
-    ).scalars()
     for asset in source_images:
         path = _safe_source_asset_path(asset.path)
         if path:
@@ -76,7 +90,7 @@ async def _local_cover_path(session: AsyncSession, work: Work) -> Path | None:
 
 
 def _state_filter(value: str) -> str:
-    if value not in {"pending", "in_library", "issues", "archived"}:
+    if value not in {"pending", "in_library", "issues", "archived", "supplement"}:
         raise HTTPException(status_code=422, detail="未知的知识库状态")
     return value
 
@@ -92,7 +106,11 @@ async def _collection_titles(
             select(CollectionMembership.work_id, Collection.title)
             .join(Collection, Collection.id == CollectionMembership.collection_id)
             .where(CollectionMembership.work_id.in_(work_ids))
-            .order_by(Collection.sort_order, Collection.title)
+            .order_by(
+                case((Collection.key == "manual-import", 0), else_=1),
+                desc(CollectionMembership.created_at),
+                Collection.title,
+            )
         )
     ).all()
     for work_id, title in rows:
@@ -102,32 +120,71 @@ async def _collection_titles(
 
 @router.get("/collections")
 async def collections(session: AsyncSession = Depends(get_db)):
+    latest_membership = (
+        select(
+            CollectionMembership.collection_id.label("collection_id"),
+            func.max(CollectionMembership.created_at).label("latest_work_added_at"),
+        )
+        .group_by(CollectionMembership.collection_id)
+        .subquery()
+    )
     groups = (
         (
             await session.execute(
-                select(Collection).order_by(Collection.sort_order, Collection.title)
+                select(Collection)
+                .outerjoin(
+                    latest_membership,
+                    latest_membership.c.collection_id == Collection.id,
+                )
+                .order_by(
+                    case((Collection.key == "manual-import", 0), else_=1),
+                    desc(latest_membership.c.latest_work_added_at),
+                    desc(Collection.created_at),
+                    Collection.title,
+                )
             )
         )
         .scalars()
         .all()
     )
+    collection_stats = (
+        await session.execute(
+            select(
+                CollectionMembership.collection_id,
+                func.count(Work.id).label("total"),
+                func.sum(
+                    case((Work.library_state == "in_library", 1), else_=0)
+                ).label("local"),
+                func.sum(
+                    case((Work.library_state == "pending", 1), else_=0)
+                ).label("pending"),
+                func.sum(
+                    case((Work.library_state == "issues", 1), else_=0)
+                ).label("issues"),
+                func.sum(
+                    case((Work.supplement_state != "none", 1), else_=0)
+                ).label("supplements"),
+            )
+            .select_from(CollectionMembership)
+            .join(Work, Work.id == CollectionMembership.work_id)
+            .group_by(CollectionMembership.collection_id)
+        )
+    ).all()
+    stats_by_collection = {
+        int(row.collection_id): {
+            "total": int(row.total or 0),
+            "local": int(row.local or 0),
+            "pending": int(row.pending or 0),
+            "issues": int(row.issues or 0),
+            "supplements": int(row.supplements or 0),
+        }
+        for row in collection_stats
+    }
     items = []
     for group in groups:
-        base = (
-            select(func.count(Work.id))
-            .select_from(Work)
-            .join(CollectionMembership, CollectionMembership.work_id == Work.id)
-            .where(CollectionMembership.collection_id == group.id)
-        )
-        total = int(await session.scalar(base) or 0)
-        local = int(
-            await session.scalar(base.where(Work.library_state == "in_library")) or 0
-        )
-        pending = int(
-            await session.scalar(base.where(Work.library_state == "pending")) or 0
-        )
-        issues = int(
-            await session.scalar(base.where(Work.library_state == "issues")) or 0
+        stats = stats_by_collection.get(
+            int(group.id),
+            {"total": 0, "local": 0, "pending": 0, "issues": 0, "supplements": 0},
         )
         items.append(
             {
@@ -136,21 +193,33 @@ async def collections(session: AsyncSession = Depends(get_db)):
                 "title": group.title,
                 "cover_url": group.cover_url,
                 "summary_prompt": group.summary_prompt,
-                "item_count": total,
-                "local_item_count": local,
-                "pending_count": pending,
-                "issue_count": issues,
+                "item_count": stats["total"],
+                "local_item_count": stats["local"],
+                "pending_count": stats["pending"],
+                "issue_count": stats["issues"],
+                "supplement_count": stats["supplements"],
             }
         )
-    counts = {
-        state: int(
-            await session.scalar(
-                select(func.count(Work.id)).where(Work.library_state == state)
+    global_stats = (
+        await session.execute(
+            select(
+                *(
+                    func.sum(case((Work.library_state == state, 1), else_=0)).label(
+                        state
+                    )
+                    for state in ("pending", "in_library", "issues", "archived")
+                ),
+                func.sum(case((Work.supplement_state != "none", 1), else_=0)).label(
+                    "supplements"
+                ),
             )
-            or 0
         )
+    ).one()
+    counts = {
+        state: int(getattr(global_stats, state) or 0)
         for state in ("pending", "in_library", "issues", "archived")
     }
+    supplement_count = int(global_stats.supplements or 0)
     return {
         "items": items,
         "summary": {
@@ -159,6 +228,7 @@ async def collections(session: AsyncSession = Depends(get_db)):
             "local_item_count": counts["in_library"],
             "issue_count": counts["issues"],
             "archived_count": counts["archived"],
+            "supplement_count": supplement_count,
             "known_distinct_count": sum(counts.values()),
             "remote_folder_item_sum": 0,
         },
@@ -196,6 +266,7 @@ async def create_collection(
         "local_item_count": 0,
         "pending_count": 0,
         "issue_count": 0,
+        "supplement_count": 0,
     }
 
 
@@ -270,7 +341,8 @@ async def add_works_to_collection(
 @router.get("/works")
 async def works(
     library_state: str = Query(
-        default="in_library", pattern="^(pending|in_library|issues|archived)$"
+        default="in_library",
+        pattern="^(pending|in_library|issues|archived|supplement)$",
     ),
     collection_id: int | None = None,
     offset: int = Query(default=0, ge=0),
@@ -278,7 +350,11 @@ async def works(
     session: AsyncSession = Depends(get_db),
 ):
     state = _state_filter(library_state)
-    query = select(Work).where(Work.library_state == state)
+    query = (
+        select(Work).where(Work.supplement_state != "none")
+        if state == "supplement"
+        else select(Work).where(Work.library_state == state)
+    )
     if state == "in_library":
         query = query.where(
             Work.processing_state == "processed",
@@ -316,9 +392,36 @@ async def works(
         else []
     )
     summary_map = {row.work_id: row for row in summaries}
+    source_image_map: dict[int, list[WorkSourceAsset]] = {}
+    if work_ids:
+        source_images = (
+            (
+                await session.execute(
+                    select(WorkSourceAsset)
+                    .where(
+                        WorkSourceAsset.work_id.in_(work_ids),
+                        WorkSourceAsset.kind == "image",
+                    )
+                    .order_by(
+                        WorkSourceAsset.work_id,
+                        WorkSourceAsset.position,
+                        WorkSourceAsset.id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for asset in source_images:
+            if asset.work_id is not None:
+                source_image_map.setdefault(int(asset.work_id), []).append(asset)
     items = []
     for work in rows:
-        local_cover = await _local_cover_path(session, work)
+        local_cover = await _local_cover_path(
+            session,
+            work,
+            source_images=source_image_map.get(int(work.id), []),
+        )
         items.append(
             {
                 "id": work.id,
@@ -333,6 +436,11 @@ async def works(
                 "source_url": work.source_url,
                 "processing_state": work.processing_state,
                 "library_state": work.library_state,
+                "supplement_state": work.supplement_state,
+                "supplement_reason": work.supplement_reason,
+                "reason": work.supplement_reason,
+                "evidence_state": work.evidence_state,
+                "track_report": work.track_report or {},
                 "selected": False,
                 "process_error": work.process_error,
                 "error_code": work.last_error_code,
@@ -443,6 +551,12 @@ async def work_summary(work_id: int, session: AsyncSession = Depends(get_db)):
             "source_url": work.source_url,
             "kind": work.kind,
             "duration_seconds": work.duration_seconds,
+            "library_state": work.library_state,
+            "supplement_state": work.supplement_state,
+            "supplement_reason": work.supplement_reason,
+            "reason": work.supplement_reason,
+            "evidence_state": work.evidence_state,
+            "track_report": work.track_report or {},
             "collections": collections,
         },
         "summary": {
@@ -521,30 +635,44 @@ async def work_location(
     page_size: int = Query(default=60, ge=1, le=200),
     session: AsyncSession = Depends(get_db),
 ):
-    ordered_ids = list(
-        (
-            await session.execute(
-                select(Work.id)
-                .where(
-                    Work.library_state == "in_library",
-                    Work.processing_state == "processed",
-                )
-                .order_by(desc(Work.updated_at), desc(Work.id))
+    target = (
+        await session.execute(
+            select(Work.id, Work.updated_at).where(
+                Work.id == work_id,
+                Work.library_state == "in_library",
+                Work.processing_state == "processed",
             )
-        ).scalars()
-    )
-    try:
-        index = ordered_ids.index(work_id)
-    except ValueError as exc:
+        )
+    ).one_or_none()
+    if target is None:
         raise HTTPException(
             status_code=404, detail="该作品当前不在可检索知识库中"
-        ) from exc
+        )
+    eligible = (
+        Work.library_state == "in_library",
+        Work.processing_state == "processed",
+    )
+    index = int(
+        await session.scalar(
+            select(func.count(Work.id)).where(
+                *eligible,
+                or_(
+                    Work.updated_at > target.updated_at,
+                    and_(Work.updated_at == target.updated_at, Work.id > target.id),
+                ),
+            )
+        )
+        or 0
+    )
+    total = int(
+        await session.scalar(select(func.count(Work.id)).where(*eligible)) or 0
+    )
     return {
         "work_id": work_id,
         "index": index,
         "offset": (index // page_size) * page_size,
         "page_size": page_size,
-        "total": len(ordered_ids),
+        "total": total,
     }
 
 
@@ -575,6 +703,77 @@ async def retry_work(work_id: int, session: AsyncSession = Depends(get_db)):
     )
     await session.commit()
     return {"id": work_id, "library_state": "pending", "job": job_to_dict(job)}
+
+
+async def _active_job_for_work(session: AsyncSession, work_id: int) -> Job | None:
+    jobs = (
+        (
+            await session.execute(
+                select(Job)
+                .where(
+                    Job.job_type.in_({"ingest", "summarize"}),
+                    Job.state.in_({"queued", "running", "cancelling"}),
+                )
+                .order_by(Job.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for job in jobs:
+        scope = job.scope if isinstance(job.scope, dict) else {}
+        for value in scope.get("work_ids") or []:
+            try:
+                if int(value) == work_id:
+                    return job
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+@router.post(
+    "/works/{work_id}/supplement",
+    response_model=WorkSupplementUploadView,
+)
+async def upload_work_supplement(
+    work_id: int,
+    rights_attested: bool = Form(...),
+    files: list[UploadFile] = File(...),
+    session: AsyncSession = Depends(get_db),
+):
+    active = await _active_job_for_work(session, work_id)
+    if active:
+        raise HTTPException(status_code=409, detail="该作品已在处理队列中")
+    try:
+        work, stored = await store_work_supplement(
+            session,
+            work_id,
+            files,
+            rights_attested=rights_attested,
+        )
+        job = await enqueue_ingest_job(session, [work.id])
+        work.supplement_state = "processing"
+        await session.commit()
+        return {
+            "id": work.id,
+            "library_state": work.library_state,
+            "supplement_state": work.supplement_state,
+            "supplement_reason": work.supplement_reason,
+            "reason": work.supplement_reason,
+            "evidence_state": work.evidence_state,
+            "track_report": work.track_report or {},
+            **stored,
+            "job": job_to_dict(job),
+        }
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LocalAssetError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/works/{work_id}/restore")

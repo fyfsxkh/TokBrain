@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR.joinpath("data")
 _LOCAL_FRONTENDS = ("http://127.0.0.1:3000", "http://localhost:3000")
-_DATA_SUBDIRECTORIES = ("media", "keyframes", "tmp", "source-assets")
+_DATA_SUBDIRECTORIES = ("media", "keyframes", "tmp", "source-assets", "package-imports")
 
 
 class ApplicationSettings(BaseSettings):
@@ -58,12 +58,16 @@ class ApplicationSettings(BaseSettings):
 
     @property
     def allowed_origins(self) -> list[str]:
-        return list(dict.fromkeys(filter(None, map(str.strip, self.frontend_origins.split(",")))))
+        return list(
+            dict.fromkeys(
+                filter(None, map(str.strip, self.frontend_origins.split(",")))
+            )
+        )
 
 
 def _runtime_directories() -> tuple[Path, ...]:
     managed_data = tuple(DATA_DIR.joinpath(name) for name in _DATA_SUBDIRECTORIES)
-    return (DATA_DIR, *managed_data, BASE_DIR.joinpath("logs"))
+    return (DATA_DIR, *managed_data)
 
 
 def ensure_directories() -> None:

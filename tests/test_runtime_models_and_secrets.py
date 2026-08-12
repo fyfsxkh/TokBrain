@@ -1,7 +1,7 @@
 from app.main import app
 from app.models import AppSetting
 import app.services.bss_bill as bss_bill
-from app.services.runtime_settings import update_runtime_settings
+from app.services.runtime_settings import get_runtime_settings, update_runtime_settings
 from app.services.secrets import SecretUnavailableError
 
 
@@ -44,6 +44,28 @@ async def test_runtime_models_are_selected_by_workload_and_reject_wrong_api_type
     assert rejected["chat_fast_model"] == "qwen3.6-flash"
 
 
+async def test_runtime_settings_normalize_invalid_persisted_answer_format():
+    session = SettingSession()
+    session.add(
+        AppSetting(
+            key="runtime",
+            value={
+                "default_answer_format": "html",
+                "summary_prompt": "  custom prompt  ",
+            },
+        )
+    )
+
+    current = await get_runtime_settings(session)
+    assert current["default_answer_format"] == "rich"
+    assert current["summary_prompt"] == "custom prompt"
+
+    updated = await update_runtime_settings(
+        session, {"default_answer_format": "still-invalid"}
+    )
+    assert updated["default_answer_format"] == "rich"
+
+
 async def test_bill_refresh_reports_unreadable_dpapi_credentials(monkeypatch):
     session = SettingSession()
 
@@ -55,6 +77,24 @@ async def test_bill_refresh_reports_unreadable_dpapi_credentials(monkeypatch):
     assert result["status"] == "credentials_unreadable"
     assert "重新输入" in result["message"]
     assert session.records["official_bill"].value == result
+
+
+async def test_bill_refresh_hides_provider_exception_details(monkeypatch):
+    session = SettingSession()
+
+    async def configured(_session, name):
+        return f"secret-{name}"
+
+    def fail_query(*_args):
+        raise RuntimeError("https://billing.example/path?token=private")
+
+    monkeypatch.setattr(bss_bill, "get_secret", configured)
+    monkeypatch.setattr(bss_bill, "_query_bill_sync", fail_query)
+
+    result = await bss_bill.refresh_official_bill(session)
+    assert result["status"] == "error"
+    assert result["message"] == "官方账单暂时无法读取，请稍后重试"
+    assert "private" not in result["message"]
 
 
 def test_settings_exposes_destructive_key_cleanup_endpoint():

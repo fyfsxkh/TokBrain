@@ -2,36 +2,73 @@
 
 /* eslint-disable @next/next/no-img-element -- public covers and local assets are user-selected sources. */
 
-import { CSSProperties, FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { DragEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
-import { AnswerBlock } from "../components/MarkdownContent";
+import { Library } from "../components/Library";
+import { Settings, ThemePicker } from "../components/Settings";
 import {
-  API_BASE,
   api,
-  ChatSource,
   Collection,
   Health,
   ImportBatch,
   ImportItem,
+  ImportItemUpdate,
   Job,
   LibrarySummary,
   RuntimeSettings,
   Usage,
   WorksPage,
 } from "../lib/api";
-import { isUserCancelled } from "../lib/errors";
-import { chooseObsidianImageDirectory, exportToObsidian } from "../lib/obsidian";
+import type { ChatMessage } from "../components/Chat";
+import { localAssetUrl } from "../lib/assets";
+import { isUserCancelled, reason } from "../lib/errors";
+import { removeConfirmedImportItems } from "../lib/importBatches";
+import {
+  rememberImportBatch,
+  rememberLocalImportBatch,
+  rememberLocalImportRightsAttestation,
+  rememberPackageBatch,
+  storedImportBatchIds,
+  storedLocalImportRightsAttestation,
+  storedPackageBatches,
+} from "../lib/importBatchStorage";
+import {
+  applyChatStreamEvent,
+  createChatStreamState,
+  visibleChatStreamContent,
+} from "../lib/chatStream";
+import {
+  clearLibraryReturnContext,
+  readLibraryReturnContext,
+} from "../lib/libraryReturn";
+import { mergeWorksPage } from "../lib/libraryPagination";
+import { activeProcessingJobIds, didAnyJobReachTerminal, isActiveProcessingJob, operationIncludesJob } from "../lib/jobPolling";
+import type { LibraryState } from "../lib/uiTypes";
 import { useTheme } from "../themes/ThemeProvider";
-import { ThemeDefinition } from "../themes/registry";
+
+const Chat = dynamic(
+  () => import("../components/Chat").then((module) => module.Chat),
+  { loading: () => <p className="muted">正在加载对话…</p>, ssr: false },
+);
 
 type Tab = "import" | "library" | "chat" | "settings";
-type LibraryState = "pending" | "in_library" | "issues" | "archived";
-type Message = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  sources?: ChatSource[];
-  status?: "pending" | "error";
+type LocalUploadState = "pending" | "creating" | "uploading" | "ready" | "duplicate" | "failed";
+type LocalVideoDraft = {
+  clientItemId: string;
+  file: File;
+  title: string;
+  targetCollectionId: number | null;
+  status: LocalUploadState;
+  message: string;
+  batchId?: string;
+  serverItemId?: number;
+};
+type PackageFileDraft = {
+  clientFileId: string;
+  file: File;
+  relativePath: string;
+  status: "pending" | "uploading" | "uploaded" | "failed";
 };
 
 const EMPTY_SUMMARY: LibrarySummary = {
@@ -52,12 +89,14 @@ const EMPTY_WORKS: WorksPage = {
 };
 const TERMINAL_BATCH_STATES = new Set(["succeeded", "partial", "failed", "cancelled"]);
 
-function reason(value: unknown, fallback = "操作失败") {
-  return value instanceof Error ? value.message : fallback;
+function batchIsTerminal(batch: ImportBatch) {
+  return TERMINAL_BATCH_STATES.has(batch.state);
 }
 
-function localAssetUrl(value?: string | null) {
-  return value?.startsWith("/api/") ? `${API_BASE}${value}` : null;
+function loadImportBatch(batch: Pick<ImportBatch, "id" | "source_type">) {
+  return batch.source_type === "package_upload"
+    ? api.packageImportBatch(batch.id)
+    : api.importBatch(batch.id);
 }
 
 function visibleErrorCode(value: string) {
@@ -78,6 +117,7 @@ function stateLabel(state: string) {
     {
       queued: "等待中",
       running: "进行中",
+      automating: "自动确认中",
       cancelling: "安全停止中",
       cancelled: "已中断",
       succeeded: "已完成",
@@ -106,11 +146,15 @@ function itemStatus(item: ImportItem) {
 }
 
 function mediaPolicyLabel(item: ImportItem) {
+  if (item.platform === "local") {
+    return item.status === "duplicate" ? "本地视频指纹去重 · 已存在" : "本地视频 · 完整处理";
+  }
   if (item.local_asset_count > 0) return "本地素材完整处理";
   if (item.download_permission === "allowed") return "作者允许下载 · 完整视频处理";
   if (item.has_audio_or_subtitle) return "作者未允许下载 · 仅字幕/音频";
   return "作者未允许下载或状态未知 · 仅基础信息";
 }
+
 
 function samePreviewWork(left: ImportItem, right: ImportItem) {
   if (
@@ -120,7 +164,11 @@ function samePreviewWork(left: ImportItem, right: ImportItem) {
   ) {
     return true;
   }
-  return left.normalized_url === right.normalized_url;
+  return Boolean(
+    left.normalized_url
+    && right.normalized_url
+    && left.normalized_url === right.normalized_url,
+  );
 }
 
 export default function Home() {
@@ -133,55 +181,89 @@ export default function Home() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [summary, setSummary] = useState<LibrarySummary>(EMPTY_SUMMARY);
   const [worksPage, setWorksPage] = useState<WorksPage>(EMPTY_WORKS);
+  const [libraryLoading, setLibraryLoading] = useState(false);
   const [libraryState, setLibraryState] = useState<LibraryState>("in_library");
   const [collectionId, setCollectionId] = useState<number | null>(null);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [importText, setImportText] = useState("");
+  const [rightsAttested, setRightsAttested] = useState(false);
   const [batch, setBatch] = useState<ImportBatch | null>(null);
   const [retainedBatches, setRetainedBatches] = useState<ImportBatch[]>([]);
   const [selectedItems, setSelectedItems] = useState<Set<number>>(new Set());
   const [itemCollections, setItemCollections] = useState<Map<number, number>>(new Map());
   const [confirmedWorkIds, setConfirmedWorkIds] = useState<number[]>([]);
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatMode, setChatMode] = useState<"fast" | "deep">("fast");
   const submittedImportTexts = useRef(new Map<string, string>());
+  const restoredLibraryPosition = useRef(false);
+  const batchRef = useRef<ImportBatch | null>(null);
+  const libraryRequestRef = useRef(0);
+  const libraryLoadingRef = useRef(false);
+  const worksPageLengthRef = useRef(worksPage.items.length);
+  const activeOperationRef = useRef("");
+  worksPageLengthRef.current = worksPage.items.length;
 
-  const loadCommon = useCallback(async () => {
-    const results = await Promise.allSettled([
-      api.health(),
-      api.settings(),
-      api.usage(),
-      api.jobs(),
-      api.collections(),
-    ]);
-    if (results[0].status === "fulfilled") setHealth(results[0].value);
-    if (results[1].status === "fulfilled") setSettings(results[1].value);
-    if (results[2].status === "fulfilled") setUsage(results[2].value);
-    if (results[3].status === "fulfilled") setJobs(results[3].value);
-    if (results[4].status === "fulfilled") {
-      setCollections(results[4].value.items);
-      setSummary(results[4].value.summary);
-    }
+  useEffect(() => {
+    batchRef.current = batch;
+  }, [batch]);
+
+  const loadHealth = useCallback(async () => {
+    setHealth(await api.health());
   }, []);
+
+  const loadSettings = useCallback(async () => {
+    setSettings(await api.settings());
+  }, []);
+
+  const loadUsage = useCallback(async () => {
+    setUsage(await api.usage());
+  }, []);
+
+  const loadJobs = useCallback(async () => {
+    const next = await api.jobs();
+    setJobs(next);
+    return next;
+  }, []);
+
+  const loadCollections = useCallback(async () => {
+    const groups = await api.collections();
+    setCollections(groups.items);
+    setSummary(groups.summary);
+  }, []);
+
+  const refreshSharedState = useCallback(async () => {
+    await Promise.allSettled([
+      loadSettings(),
+      loadUsage(),
+      loadJobs(),
+      loadCollections(),
+    ]);
+  }, [loadCollections, loadJobs, loadSettings, loadUsage]);
 
   const loadLibrary = useCallback(
     async (append = false) => {
-      const offset = append ? worksPage.items.length : 0;
-      const [groups, page] = await Promise.all([
-        api.collections(),
-        api.works(libraryState, collectionId ?? undefined, offset),
-      ]);
-      setCollections(groups.items);
-      setSummary(groups.summary);
-      setWorksPage((current) => ({
-        ...page,
-        items: append ? [...current.items, ...page.items] : page.items,
-      }));
+      if (append && libraryLoadingRef.current) return;
+      const requestId = ++libraryRequestRef.current;
+      libraryLoadingRef.current = true;
+      setLibraryLoading(true);
+      const offset = append ? worksPageLengthRef.current : 0;
+      try {
+        const page = await api.works(libraryState, collectionId ?? undefined, offset);
+        if (requestId !== libraryRequestRef.current) return;
+        setWorksPage((current) => mergeWorksPage(current, page, append));
+      } catch (value) {
+        if (requestId === libraryRequestRef.current) throw value;
+      } finally {
+        if (requestId === libraryRequestRef.current) {
+          libraryLoadingRef.current = false;
+          setLibraryLoading(false);
+        }
+      }
     },
-    [collectionId, libraryState, worksPage.items.length],
+    [collectionId, libraryState],
   );
 
   useEffect(() => {
@@ -189,15 +271,96 @@ export default function Home() {
     if (params.get("tab") === "library") {
       setTab("library");
       const state = params.get("state");
-      if (state && ["pending", "in_library", "issues", "archived"].includes(state)) {
+      if (state && ["pending", "in_library", "supplement", "issues", "archived"].includes(state)) {
         setLibraryState(state as LibraryState);
+      }
+      const restoredCollectionId = Number(params.get("collection_id"));
+      if (Number.isInteger(restoredCollectionId) && restoredCollectionId > 0) {
+        setCollectionId(restoredCollectionId);
       }
     }
   }, []);
 
   useEffect(() => {
-    loadCommon().catch(() => undefined);
-  }, [loadCommon]);
+    Promise.allSettled([loadHealth(), refreshSharedState()]).catch(() => undefined);
+  }, [loadHealth, refreshSharedState]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setRightsAttested(storedLocalImportRightsAttestation());
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  function changeRightsAttestation(attested: boolean) {
+    setRightsAttested(attested);
+    rememberLocalImportRightsAttestation(attested);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function recoverImports() {
+      const packageIds = new Set(storedPackageBatches());
+      const ids = [...new Set([...storedImportBatchIds(), ...packageIds])];
+      if (!ids.length) return;
+      const settled = await Promise.allSettled(ids.map((id) =>
+        packageIds.has(id) ? api.packageImportBatch(id) : api.importBatch(id),
+      ));
+      if (cancelled) return;
+      const loaded = settled
+        .filter((result): result is PromiseFulfilledResult<ImportBatch> => result.status === "fulfilled")
+        .map((result) => result.value)
+        .sort((left, right) => new Date(left.created_at).getTime() - new Date(right.created_at).getTime());
+      const loadedIds = new Set(loaded.map((entry) => entry.id));
+      const recovered = loaded
+        .map((entry) => ({
+          ...entry,
+          items: batchIsTerminal(entry)
+            ? entry.items.filter((item) => RETAINED_IMPORT_STATUSES.has(item.status))
+            : entry.items,
+        }))
+        .filter((entry) => !batchIsTerminal(entry) || entry.items.length);
+      if (!recovered.length) {
+        setRetainedBatches((current) => current.filter((entry) => !loadedIds.has(entry.id)));
+        return;
+      }
+      const latestActive = recovered.findLast((entry) => !batchIsTerminal(entry));
+      const latest = latestActive || recovered.at(-1)!;
+      const currentBatch = batchRef.current;
+      const primary = currentBatch || latest;
+      setBatch((current) => current || latest);
+      setRetainedBatches((current) => {
+        const merged = new Map(
+          current
+            .filter((entry) => !loadedIds.has(entry.id))
+            .map((entry) => [entry.id, entry]),
+        );
+        for (const entry of recovered) {
+          if (entry.id !== primary.id) merged.set(entry.id, entry);
+        }
+        return [...merged.values()];
+      });
+      const readyItems = recovered.flatMap((entry) =>
+        entry.items.filter((item) => item.status === "ready"),
+      );
+      setSelectedItems((current) => new Set([
+        ...current,
+        ...readyItems.map((item) => item.id),
+      ]));
+      setItemCollections((current) => {
+        const updated = new Map(current);
+        for (const item of readyItems) {
+          if (item.target_collection_id != null) {
+            updated.set(item.id, item.target_collection_id);
+          }
+        }
+        return updated;
+      });
+      setNotice("已恢复刷新前的导入批次；可继续查看进度、补件或确认入库");
+    }
+    recoverImports().catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!notice) return;
@@ -207,15 +370,31 @@ export default function Home() {
 
   useEffect(() => {
     if (tab === "library") loadLibrary(false).catch((value) => setError(reason(value)));
-  }, [tab, libraryState, collectionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loadLibrary, tab]);
 
   useEffect(() => {
-    if (!batch || TERMINAL_BATCH_STATES.has(batch.state)) return;
+    if (restoredLibraryPosition.current || tab !== "library" || !worksPage.items.length) return;
+    const context = readLibraryReturnContext();
+    if (
+      !context
+      || context.state !== libraryState
+      || context.collectionId !== collectionId
+    ) return;
+    restoredLibraryPosition.current = true;
+    const frame = window.requestAnimationFrame(() => {
+      window.scrollTo({ top: context.scrollY, behavior: "auto" });
+      clearLibraryReturnContext();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [collectionId, libraryState, tab, worksPage.items.length]);
+
+  useEffect(() => {
+    if (!batch || batchIsTerminal(batch)) return;
     const timer = window.setTimeout(async () => {
       try {
-        const next = await api.importBatch(batch.id);
+        const next = await loadImportBatch(batch);
         setBatch(next);
-        if (TERMINAL_BATCH_STATES.has(next.state)) {
+        if (batchIsTerminal(next)) {
           const readyIds = next.items
             .filter((item) => item.status === "ready")
             .map((item) => item.id);
@@ -241,57 +420,78 @@ export default function Home() {
                 : `已去掉 ${duplicateCount} 条重复链接，没有新的作品需要预检`,
             );
           }
-          await loadCommon();
+          await Promise.allSettled([loadUsage(), loadCollections()]);
         }
       } catch (value) {
         setError(reason(value, "读取解析进度失败"));
       }
     }, 1000);
     return () => window.clearTimeout(timer);
-  }, [batch, loadCommon]);
+  }, [batch, loadCollections, loadUsage]);
 
   useEffect(() => {
-    const active = jobs.find(
-      (job) => ["queued", "running", "cancelling"].includes(job.state) && job.job_type !== "link_preview",
-    );
-    if (!active) return;
+    const activeIds = activeProcessingJobIds(jobs);
+    if (!activeIds.size) return;
     const timer = window.setTimeout(async () => {
       try {
-        await loadCommon();
-        if (batch) setBatch(await api.importBatch(batch.id));
-        if (tab === "library") await loadLibrary(false);
+        const next = await api.jobs();
+        setJobs(next);
+        const reachedTerminal = didAnyJobReachTerminal(jobs, next);
+        if (reachedTerminal) {
+          await Promise.allSettled([
+            loadUsage(),
+            loadCollections(),
+            ...(tab === "library" ? [loadLibrary(false)] : []),
+          ]);
+        }
       } catch {
         // The next polling cycle or a manual refresh will retry local status reads.
       }
     }, 2000);
     return () => window.clearTimeout(timer);
-  }, [batch, jobs, loadCommon, loadLibrary, tab]);
+  }, [jobs, loadCollections, loadLibrary, loadUsage, tab]);
 
-  async function perform(name: string, operation: () => Promise<unknown>, success: string) {
+  function beginOperation(name: string) {
+    if (activeOperationRef.current) return false;
+    activeOperationRef.current = name;
     setBusy(name);
     setError("");
+    return true;
+  }
+
+  function endOperation(name: string) {
+    if (activeOperationRef.current !== name) return;
+    activeOperationRef.current = "";
+    setBusy("");
+  }
+
+  async function perform(name: string, operation: () => Promise<unknown>, success: string) {
+    if (!beginOperation(name)) return false;
     try {
-      await operation();
+      const result = await operation();
       setNotice(success);
-      await loadCommon();
+      if (operationIncludesJob(result)) {
+        await loadJobs();
+      } else if (name !== "health-check" && name !== "obsidian-image-folder") {
+        await refreshSharedState();
+      }
       return true;
     } catch (value) {
       if (isUserCancelled(value)) return false;
       setError(reason(value));
       return false;
     } finally {
-      setBusy("");
+      endOperation(name);
     }
   }
 
   async function submitImport(event: FormEvent) {
     event.preventDefault();
-    if (!importText.trim()) return;
-    setBusy("import");
-    setError("");
+    if (!importText.trim() || !beginOperation("import")) return;
     const submittedText = importText;
     try {
-      const created = await api.createImportBatch(submittedText);
+      const created = await api.createImportBatch({ text: submittedText });
+      rememberImportBatch(created.batch_id);
       const next = await api.importBatch(created.batch_id);
       const duplicateOnly =
         created.queued_count === 0
@@ -304,7 +504,7 @@ export default function Home() {
         setNotice(
           `已去掉 ${created.duplicate_count} 条重复链接，没有新的作品需要预检`,
         );
-        await loadCommon();
+        await refreshSharedState();
         return;
       }
       if (batch) {
@@ -334,20 +534,19 @@ export default function Home() {
     } catch (value) {
       setError(reason(value));
     } finally {
-      setBusy("");
+      endOperation("import");
     }
   }
 
   async function cancelBatch() {
-    if (!batch) return;
-    setBusy("cancel-batch");
+    if (!batch || !beginOperation("cancel-batch")) return;
     try {
       setBatch(await api.cancelImportBatch(batch.id));
       setNotice("正在安全停止；已成功解析的结果会继续保留");
     } catch (value) {
       setError(reason(value));
     } finally {
-      setBusy("");
+      endOperation("cancel-batch");
     }
   }
 
@@ -356,15 +555,19 @@ export default function Home() {
     const owner = [batch, ...retainedBatches].find((candidate) =>
       candidate?.items.some((entry) => entry.id === item.id),
     );
-    if (!owner) return;
-    setBusy(`upload-${item.id}`);
-    setError("");
+    const operationName = `upload-${item.id}`;
+    if (!owner || !beginOperation(operationName)) return;
     try {
-      await api.uploadImportAssets(item.id, files);
+      if (owner.source_type === "local_upload") {
+        if (files.length !== 1) throw new Error("本地视频作品一次只能上传一个视频文件");
+        await api.uploadLocalImportVideo(owner.id, item.id, files[0]);
+      } else {
+        await api.uploadImportAssets(item.id, files);
+      }
       if (item.existing_work_id) {
         await api.retry(item.existing_work_id);
       }
-      const next = await api.importBatch(owner.id);
+      const next = await loadImportBatch(owner);
       if (batch?.id === owner.id) {
         setBatch(next);
       } else {
@@ -379,7 +582,70 @@ export default function Home() {
     } catch (value) {
       setError(reason(value, "本地补件失败"));
     } finally {
-      setBusy("");
+      endOperation(operationName);
+    }
+  }
+
+  async function acceptLocalBatch(next: ImportBatch) {
+    const currentBatch = batchRef.current;
+    if (currentBatch && currentBatch.id !== next.id) {
+      const retainedItems = currentBatch.items.filter((item) =>
+        RETAINED_IMPORT_STATUSES.has(item.status),
+      );
+      if (retainedItems.length) {
+        setRetainedBatches((current) => [
+          ...current.filter((entry) => entry.id !== currentBatch.id && entry.id !== next.id),
+          { ...currentBatch, items: retainedItems },
+        ]);
+      }
+    }
+    batchRef.current = next;
+    setBatch(next);
+    const readyItems = next.items.filter((item) => item.status === "ready");
+    setSelectedItems((current) => new Set([
+      ...current,
+      ...readyItems.map((item) => item.id),
+    ]));
+    setItemCollections((current) => {
+      const updated = new Map(current);
+      for (const item of readyItems) {
+        if (item.target_collection_id != null) {
+          updated.set(item.id, item.target_collection_id);
+        }
+      }
+      return updated;
+    });
+    const failed = next.items.filter((item) => item.status === "failed").length;
+    const sourceLabel = next.source_type === "package_upload" ? "数据包视频" : "本地视频";
+    setNotice(
+      failed > 0
+        ? `${sourceLabel}已验证 ${readyItems.length} 个，${failed} 个失败；成功项已自动勾选`
+        : `${readyItems.length} 个${sourceLabel}已验证并自动勾选，可以确认加入待入库`,
+    );
+    await refreshSharedState();
+  }
+
+  async function editPreviewItem(item: ImportItem, changes: ImportItemUpdate) {
+    const owner = [batch, ...retainedBatches].find((candidate) =>
+      candidate?.items.some((entry) => entry.id === item.id),
+    );
+    const operationName = `edit-preview-${item.id}`;
+    if (!owner || !beginOperation(operationName)) return;
+    try {
+      await api.updateImportItem(item.id, changes);
+      const next = await loadImportBatch(owner);
+      if (batch?.id === owner.id) {
+        setBatch(next);
+      } else {
+        setRetainedBatches((current) =>
+          current.map((entry) => entry.id === owner.id ? next : entry),
+        );
+      }
+      setNotice("本地视频信息已保存");
+    } catch (value) {
+      setError(reason(value, "保存本地视频信息失败"));
+    } finally {
+      endOperation(operationName);
     }
   }
 
@@ -388,9 +654,8 @@ export default function Home() {
     const owner = [batch, ...retainedBatches].find((candidate) =>
       candidate?.items.some((entry) => entry.id === item.id),
     );
-    if (!owner) return;
-    setBusy(`remove-preview-${item.id}`);
-    setError("");
+    const operationName = `remove-preview-${item.id}`;
+    if (!owner || !beginOperation(operationName)) return;
     try {
       const next = await api.removeImportItem(item.id);
       if (batch?.id === owner.id) {
@@ -423,12 +688,12 @@ export default function Home() {
     } catch (value) {
       setError(reason(value, "删除预检结果失败"));
     } finally {
-      setBusy("");
+      endOperation(operationName);
     }
   }
 
   async function confirmBatch(itemIds: number[]) {
-    if (!itemIds.length) return;
+    if (!itemIds.length || activeOperationRef.current) return;
     const requestedItems = new Set(itemIds);
     const candidates = [...retainedBatches, ...(batch ? [batch] : [])];
     const manualCollectionId = collections.find((group) => group.key === "manual-import")?.id;
@@ -456,29 +721,51 @@ export default function Home() {
       .filter((entry) => entry.items.length);
     if (!groups.length) return;
     const confirmedIds: number[] = [];
-    const accepted = await perform(
-      "confirm",
-      async () => {
-        for (const group of groups) {
+    const confirmedItemIds = new Set<number>();
+    const failures: string[] = [];
+    if (!beginOperation("confirm")) return;
+    try {
+      for (const group of groups) {
+        try {
           const result = await api.confirmImportBatch(group.batch.id, group.items);
           confirmedIds.push(...result.work_ids);
+          group.items.forEach((item) => confirmedItemIds.add(item.item_id));
+        } catch (value) {
+          failures.push(`${group.batch.id}: ${reason(value, "确认失败")}`);
         }
-      },
-      "所选作品已加入待入库，可直接点击“入库”开始处理",
-    );
-    if (accepted) {
+      }
+
+      if (!confirmedItemIds.size) {
+        setError(failures.join("；") || "确认入库失败");
+        return;
+      }
+
       const uniqueConfirmedIds = [...new Set(confirmedIds)];
       setNotice(
-        `已将 ${uniqueConfirmedIds.length} 个不同作品加入待入库，可直接点击“入库”开始处理`,
+        failures.length
+          ? `已确认 ${uniqueConfirmedIds.length} 个不同作品；${failures.length} 个批次失败，失败项仍保留`
+          : `已将 ${uniqueConfirmedIds.length} 个不同作品加入待入库，可直接点击“入库”开始处理`,
       );
       setConfirmedWorkIds((current) => [
         ...new Set([...current, ...uniqueConfirmedIds]),
       ]);
-      setSelectedItems(new Set());
-      setItemCollections(new Map());
-      const refreshed = await Promise.all(
-        candidates.map((entry) => api.importBatch(entry.id)),
-      );
+      setSelectedItems((current) => {
+        const next = new Set(current);
+        confirmedItemIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setItemCollections((current) => {
+        const next = new Map(current);
+        confirmedItemIds.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      const settled = await Promise.allSettled(candidates.map(loadImportBatch));
+      const refreshed = candidates.map((entry, index) => {
+        const result = settled[index];
+        if (result.status === "fulfilled") return result.value;
+        return removeConfirmedImportItems(entry, confirmedItemIds);
+      });
       const current = batch
         ? refreshed.find((entry) => entry.id === batch.id) || null
         : null;
@@ -494,6 +781,10 @@ export default function Home() {
           }))
           .filter((entry) => entry.items.length),
       );
+      if (failures.length) setError(failures.join("；"));
+      await refreshSharedState();
+    } finally {
+      endOperation("confirm");
     }
   }
 
@@ -515,11 +806,12 @@ export default function Home() {
   async function ask(event: FormEvent) {
     event.preventDefault();
     const text = question.trim();
-    if (!text || busy === "chat") return;
+    if (!text) return;
     const history = messages
       .filter((message) => !message.status)
       .map((message) => ({ role: message.role, content: message.content }));
-    const user: Message = { id: crypto.randomUUID(), role: "user", content: text };
+    if (!beginOperation("chat")) return;
+    const user: ChatMessage = { id: crypto.randomUUID(), role: "user", content: text };
     const assistantId = crypto.randomUUID();
     setQuestion("");
     setMessages((current) => [
@@ -527,23 +819,44 @@ export default function Home() {
       user,
       { id: assistantId, role: "assistant", content: "正在查找相关作品…", status: "pending" },
     ]);
-    setBusy("chat");
+    let streamState = createChatStreamState();
+    let streamRenderFrame = 0;
+    const renderStreamState = () => {
+      streamRenderFrame = 0;
+      const snapshot = streamState;
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: visibleChatStreamContent(snapshot),
+                sources: snapshot.sources,
+                status: snapshot.completed ? undefined : "pending",
+              }
+            : message,
+        ),
+      );
+    };
+    const scheduleStreamRender = (immediate = false) => {
+      if (immediate && streamRenderFrame) {
+        window.cancelAnimationFrame(streamRenderFrame);
+        streamRenderFrame = 0;
+      }
+      if (immediate) {
+        renderStreamState();
+      } else if (!streamRenderFrame) {
+        streamRenderFrame = window.requestAnimationFrame(renderStreamState);
+      }
+    };
     try {
-      let content = "";
-      let sources: ChatSource[] = [];
       await api.askStream(text, history, chatMode, (streamEvent) => {
-        if (streamEvent.type === "delta") content += streamEvent.text;
-        if (streamEvent.type === "sources") sources = streamEvent.sources;
-        if (streamEvent.type === "stage" && !content) content = streamEvent.message;
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === assistantId
-              ? { ...message, content: content || "正在处理…", sources, status: undefined }
-              : message,
-          ),
-        );
+        streamState = applyChatStreamEvent(streamState, streamEvent);
+        scheduleStreamRender(streamState.completed);
       });
+      if (!streamState.completed) throw new Error("回答流意外中断，请重试");
+      if (!streamState.content) throw new Error("回答为空，请重试");
     } catch (value) {
+      if (streamRenderFrame) window.cancelAnimationFrame(streamRenderFrame);
       setMessages((current) =>
         current.map((message) =>
           message.id === assistantId
@@ -552,21 +865,20 @@ export default function Home() {
         ),
       );
     } finally {
-      setBusy("");
+      if (streamRenderFrame) window.cancelAnimationFrame(streamRenderFrame);
+      endOperation("chat");
     }
   }
 
   const activeJobs = jobs
-    .filter(
-      (job) => ["queued", "running", "cancelling"].includes(job.state) && job.job_type !== "link_preview",
-    )
+    .filter(isActiveProcessingJob)
     .sort((left, right) => {
       const priority = (job: Job) => job.state === "running" || job.state === "cancelling" ? 0 : 1;
       return priority(left) - priority(right)
         || new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
     });
   const titles: Record<Tab, string> = {
-    import: "视频链接导入",
+    import: "导入视频",
     library: theme.copy.pages.library,
     chat: theme.copy.pages.chat,
     settings: theme.copy.pages.settings,
@@ -579,11 +891,11 @@ export default function Home() {
           <span className="brand-mark">{theme.mark}</span>
           <div><strong>TokBrain</strong><small>{theme.copy.brandTagline}</small></div>
         </div>
-        <nav>
-          <button className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>导入<i /></button>
-          <button className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}>知识库<i /></button>
-          <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>对话<i /></button>
-          <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>设置<i /></button>
+        <nav aria-label="主要功能">
+          <button type="button" aria-current={tab === "import" ? "page" : undefined} className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>导入<i /></button>
+          <button type="button" aria-current={tab === "library" ? "page" : undefined} className={tab === "library" ? "active" : ""} onClick={() => setTab("library")}>知识库<i /></button>
+          <button type="button" aria-current={tab === "chat" ? "page" : undefined} className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>对话<i /></button>
+          <button type="button" aria-current={tab === "settings" ? "page" : undefined} className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>设置<i /></button>
         </nav>
         <div className="theme-ambient" aria-hidden="true">
           <span className="ambient-symbol" />
@@ -601,8 +913,8 @@ export default function Home() {
             <span className={`pill ${batch.state}`}>{stateLabel(batch.state)}</span>
           )}
         </header>
-        {notice && <div className="toast ok">{notice}<button onClick={() => setNotice("")}>×</button></div>}
-        {error && <div className="toast error">{error}<button onClick={() => setError("")}>×</button></div>}
+        {notice && <div className="toast ok" role="status" aria-live="polite">{notice}<button type="button" aria-label="关闭成功提示" onClick={() => setNotice("")}>×</button></div>}
+        {error && <div className="toast error" role="alert">{error}<button type="button" aria-label="关闭错误提示" onClick={() => setError("")}>×</button></div>}
         {!!activeJobs.length && (
           <div className="job-queue">
             {activeJobs.map((job, index) => (
@@ -615,44 +927,60 @@ export default function Home() {
             ))}
           </div>
         )}
-        {tab === "import" && (
-          <ImportWorkspace
-            text={importText}
-            setText={setImportText}
-            batch={batch}
-            retainedBatches={retainedBatches}
-            selected={selectedItems}
-            setSelected={setSelectedItems}
-            itemCollections={itemCollections}
-            setItemCollections={setItemCollections}
-            busy={busy}
-            onSubmit={submitImport}
-            onCancel={cancelBatch}
-            onConfirm={confirmBatch}
-            onIngestConfirmed={ingestConfirmedWorks}
-            onUpload={upload}
-            onDelete={removePreviewItem}
-            settings={settings}
-            usage={usage}
-            summary={summary}
-            collections={collections}
-            confirmedWorkIds={confirmedWorkIds}
-          />
-        )}
+        <ImportWorkspace
+          hidden={tab !== "import"}
+          text={importText}
+          setText={setImportText}
+          rightsAttested={rightsAttested}
+          setRightsAttested={changeRightsAttestation}
+          batch={batch}
+          retainedBatches={retainedBatches}
+          selected={selectedItems}
+          setSelected={setSelectedItems}
+          itemCollections={itemCollections}
+          setItemCollections={setItemCollections}
+          busy={busy}
+          onSubmit={submitImport}
+          onCancel={cancelBatch}
+          onConfirm={confirmBatch}
+          onIngestConfirmed={ingestConfirmedWorks}
+          onUpload={upload}
+          onLocalBatchReady={acceptLocalBatch}
+          onEdit={editPreviewItem}
+          onDelete={removePreviewItem}
+          settings={settings}
+          usage={usage}
+          summary={summary}
+          collections={collections}
+          confirmedWorkIds={confirmedWorkIds}
+        />
         {tab === "library" && (
           <Library
             key={`${libraryState}:${collectionId ?? "all"}`}
             state={libraryState}
-            setState={setLibraryState}
+            setState={(value) => {
+              if (value === libraryState) return;
+              libraryRequestRef.current += 1;
+              setWorksPage(EMPTY_WORKS);
+              setLibraryState(value);
+            }}
             collectionId={collectionId}
-            setCollectionId={setCollectionId}
+            setCollectionId={(value) => {
+              if (value === collectionId) return;
+              libraryRequestRef.current += 1;
+              setWorksPage(EMPTY_WORKS);
+              setCollectionId(value);
+            }}
             collections={collections}
             summary={summary}
             page={worksPage}
             reload={() => loadLibrary(false)}
             loadMore={() => loadLibrary(true)}
+            loading={libraryLoading}
             perform={perform}
             globalSummaryPrompt={settings?.summary_prompt || ""}
+            rightsAttested={rightsAttested}
+            setRightsAttested={changeRightsAttestation}
           />
         )}
         {tab === "chat" && (
@@ -702,16 +1030,596 @@ function JobProgress({ job, queuePosition, onCancel }: { job: Job; queuePosition
         <strong>{job.message}</strong>
         <small>{completed}/{total || "?"}</small>
       </div>
-      <div className="progress-track"><i style={{ width: `${percent}%` }} /></div>
+      <div className="progress-track" role="progressbar" aria-label={job.message} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}><i style={{ width: `${percent}%` }} /></div>
       <span className={`pill ${job.state}`}>{stateLabel(job.state)}</span>
       <button className="danger" disabled={job.state === "cancelling"} onClick={onCancel}>安全停止</button>
     </section>
   );
 }
 
+const LOCAL_VIDEO_LIMIT = 10;
+const LOCAL_VIDEO_MAX_BYTES = 1024 * 1024 * 1024;
+const LOCAL_VIDEO_EXTENSIONS = new Set(["mp4", "mov", "mkv", "webm"]);
+
+function localVideoTitle(filename: string) {
+  const title = filename.replace(/\.[^.]+$/, "").trim();
+  return title || filename;
+}
+
+function readableBytes(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function localFileError(file: File) {
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+  if (!LOCAL_VIDEO_EXTENSIONS.has(extension)) return "仅支持 MP4、MOV、MKV、WebM 视频";
+  if (file.size <= 0) return "文件为空";
+  if (file.size > LOCAL_VIDEO_MAX_BYTES) return "文件超过 1 GB 上限";
+  return "";
+}
+
+function LocalVideoImporter({
+  collections,
+  disabled,
+  rightsAttested,
+  setRightsAttested,
+  onBatchReady,
+  onUploadingChange,
+}: {
+  collections: Collection[];
+  disabled: boolean;
+  rightsAttested: boolean;
+  setRightsAttested: (value: boolean) => void;
+  onBatchReady: (batch: ImportBatch) => Promise<void>;
+  onUploadingChange: (value: boolean) => void;
+}) {
+  const suggestedCollectionId = collections.find((group) => group.key === "manual-import")?.id
+    ?? collections[0]?.id
+    ?? null;
+  const [defaultCollectionId, setDefaultCollectionId] = useState<number | null>(suggestedCollectionId);
+  const [drafts, setDrafts] = useState<LocalVideoDraft[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const effectiveDefaultCollectionId = defaultCollectionId ?? suggestedCollectionId;
+
+  function appendFiles(files: File[]) {
+    setLocalError("");
+    if (!files.length) return;
+    const remaining = Math.max(0, LOCAL_VIDEO_LIMIT - drafts.length);
+    if (remaining === 0) {
+      setLocalError(`每批最多选择 ${LOCAL_VIDEO_LIMIT} 个视频`);
+      return;
+    }
+    if (files.length > remaining) {
+      setLocalError(`每批最多选择 ${LOCAL_VIDEO_LIMIT} 个视频，本次仅加入前 ${remaining} 个`);
+    }
+    const next = files.slice(0, remaining).map((file): LocalVideoDraft => {
+      const validationError = localFileError(file);
+      return {
+        clientItemId: crypto.randomUUID(),
+        file,
+        title: localVideoTitle(file.name),
+        targetCollectionId: effectiveDefaultCollectionId,
+        status: validationError ? "failed" : "pending",
+        message: validationError || "等待上传",
+      };
+    });
+    setDrafts((current) => [...current, ...next]);
+  }
+
+  function onDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (!disabled && !uploading) appendFiles(Array.from(event.dataTransfer.files));
+  }
+
+  function updateDraft(clientItemId: string, change: Partial<LocalVideoDraft>) {
+    setDrafts((current) => current.map((draft) =>
+      draft.clientItemId === clientItemId ? { ...draft, ...change } : draft,
+    ));
+  }
+
+  async function uploadVideos() {
+    const candidates = drafts.filter((draft) =>
+      draft.status !== "ready"
+      && draft.status !== "duplicate"
+      && !localFileError(draft.file),
+    );
+    if (!rightsAttested || !candidates.length || disabled || uploading) return;
+    setUploading(true);
+    onUploadingChange(true);
+    setLocalError("");
+    setDrafts((current) => current.map((draft) =>
+      candidates.some((candidate) => candidate.clientItemId === draft.clientItemId)
+        ? { ...draft, status: "creating", message: "正在创建导入条目" }
+        : draft,
+    ));
+    try {
+      const created = await api.createLocalImportBatch({
+        rights_attested: true,
+        items: candidates.map((draft) => ({
+          client_item_id: draft.clientItemId,
+          filename: draft.file.name,
+          size_bytes: draft.file.size,
+          ...(draft.targetCollectionId != null
+            ? { target_collection_id: draft.targetCollectionId }
+            : {}),
+        })),
+      });
+      rememberLocalImportBatch(created.id);
+      const matchedItems = new Map<string, ImportItem>();
+      candidates.forEach((draft, index) => {
+        const item = created.items.find((entry) => entry.client_item_id === draft.clientItemId)
+          ?? created.items.find((entry) => entry.ordinal === index + 1);
+        if (item) matchedItems.set(draft.clientItemId, item);
+      });
+      setDrafts((current) => current.map((draft) => {
+        const item = matchedItems.get(draft.clientItemId);
+        if (!item) {
+          return candidates.some((candidate) => candidate.clientItemId === draft.clientItemId)
+            ? { ...draft, status: "failed", message: "后台未返回对应导入条目" }
+            : draft;
+        }
+        return {
+          ...draft,
+          batchId: created.id,
+          serverItemId: item.id,
+          status: "uploading",
+          message: "正在验证并上传",
+        };
+      }));
+
+      let cursor = 0;
+      async function worker() {
+        while (cursor < candidates.length) {
+          const draft = candidates[cursor++];
+          const item = matchedItems.get(draft.clientItemId);
+          if (!item) continue;
+          try {
+            await api.updateImportItem(item.id, {
+              title: draft.title.trim() || localVideoTitle(draft.file.name),
+              target_collection_id: draft.targetCollectionId,
+            });
+            const result = await api.uploadLocalImportVideo(created.id, item.id, draft.file);
+            const duplicate = result.status === "duplicate" || result.existing_work_id != null;
+            updateDraft(draft.clientItemId, {
+              status: duplicate ? "duplicate" : "ready",
+              message: duplicate ? "知识库中已有相同视频" : "上传与视频校验完成",
+            });
+          } catch (value) {
+            updateDraft(draft.clientItemId, {
+              status: "failed",
+              message: reason(value, "上传失败"),
+            });
+          }
+        }
+      }
+      await Promise.all([worker(), worker()]);
+      const refreshed = await api.importBatch(created.id);
+      setDrafts((current) => current.map((draft) => {
+        const item = refreshed.items.find((entry) => entry.client_item_id === draft.clientItemId);
+        if (!item || draft.status === "failed") return draft;
+        if (item.status === "duplicate") {
+          return { ...draft, status: "duplicate", message: "知识库中已有相同视频" };
+        }
+        if (item.status === "ready") {
+          return { ...draft, status: "ready", message: "上传与视频校验完成" };
+        }
+        return draft;
+      }));
+      await onBatchReady(refreshed);
+    } catch (value) {
+      const message = reason(value, "创建本地视频批次失败");
+      setLocalError(message);
+      setDrafts((current) => current.map((draft) =>
+        draft.status === "creating" ? { ...draft, status: "failed", message } : draft,
+      ));
+    } finally {
+      setUploading(false);
+      onUploadingChange(false);
+    }
+  }
+
+  const uploadableCount = drafts.filter((draft) =>
+    draft.status !== "ready"
+    && draft.status !== "duplicate"
+    && !localFileError(draft.file),
+  ).length;
+  const localStatusLabel: Record<LocalUploadState, string> = {
+    pending: "待上传",
+    creating: "准备中",
+    uploading: "上传中",
+    ready: "可确认",
+    duplicate: "已存在",
+    failed: "失败",
+  };
+
+  return (
+    <section className="card local-import-card">
+      <div className="section-head">
+        <div><span className="kicker">本地视频</span><h2>导入已经下载好的视频</h2></div>
+        <small>每批最多 10 个 · 同时上传 2 个 · 不访问抖音</small>
+      </div>
+      <div className="local-import-controls">
+        <label
+          className={`local-dropzone ${dragging ? "dragging" : ""} ${disabled ? "disabled" : ""}`}
+          onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+        >
+          <strong>选择或拖入本地视频</strong>
+          <span>支持 MP4、MOV、MKV、WebM，单文件不超过 1 GB</span>
+          <input
+            type="file"
+            multiple
+            accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm,video/x-matroska"
+            disabled={disabled || uploading || drafts.length >= LOCAL_VIDEO_LIMIT}
+            onChange={(event) => {
+              appendFiles(Array.from(event.target.files || []));
+              event.target.value = "";
+            }}
+          />
+        </label>
+        <label className="local-default-collection">
+          <span>本批默认收藏夹</span>
+          <select
+            value={effectiveDefaultCollectionId ?? ""}
+            disabled={uploading || !collections.length}
+            onChange={(event) => {
+              const nextId = event.target.value ? Number(event.target.value) : null;
+              setDefaultCollectionId(nextId);
+              setDrafts((current) => current.map((draft) =>
+                ["pending", "failed"].includes(draft.status)
+                  ? { ...draft, targetCollectionId: nextId }
+                  : draft,
+              ));
+            }}
+          >
+            {!collections.length && <option value="">暂无收藏夹</option>}
+            {collections.map((group) => (
+              <option key={group.id} value={group.id}>{group.title}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {!!drafts.length && (
+        <div className="local-file-list">
+          {drafts.map((draft, index) => (
+            <article className={`local-file status-${draft.status}`} key={draft.clientItemId}>
+              <span className="local-file-order">{index + 1}</span>
+              <div className="local-file-fields">
+                <label>
+                  <span>标题</span>
+                  <input
+                    value={draft.title}
+                    disabled={uploading || draft.status === "ready" || draft.status === "duplicate"}
+                    onChange={(event) => updateDraft(draft.clientItemId, { title: event.target.value })}
+                  />
+                </label>
+                <label>
+                  <span>收藏夹</span>
+                  <select
+                    value={draft.targetCollectionId ?? ""}
+                    disabled={uploading || draft.status === "ready" || draft.status === "duplicate" || !collections.length}
+                    onChange={(event) => updateDraft(draft.clientItemId, {
+                      targetCollectionId: event.target.value ? Number(event.target.value) : null,
+                    })}
+                  >
+                    {!collections.length && <option value="">暂无收藏夹</option>}
+                    {collections.map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}
+                  </select>
+                </label>
+              </div>
+              <div className="local-file-state">
+                <span className={`pill ${draft.status}`}>{localStatusLabel[draft.status]}</span>
+                <small>{draft.file.name} · {readableBytes(draft.file.size)}</small>
+                <small>{draft.message}</small>
+              </div>
+              {!uploading && (
+                <button
+                  type="button"
+                  className="link"
+                  aria-label={`移除 ${draft.file.name}`}
+                  onClick={() => setDrafts((current) => current.filter((item) => item.clientItemId !== draft.clientItemId))}
+                >
+                  移除
+                </button>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+      {localError && <p className="local-import-error">{localError}</p>}
+      <div className="local-import-foot">
+        <label className="rights-attestation">
+          <input
+            type="checkbox"
+            checked={rightsAttested}
+            disabled={uploading}
+            onChange={(event) => setRightsAttested(event.target.checked)}
+          />
+          <span>我确认有权处理这些视频文件，并授权 TokBrain 在本机进行解析与 AI 入库处理。</span>
+        </label>
+        <button
+          type="button"
+          className="primary"
+          disabled={!rightsAttested || !uploadableCount || disabled || uploading}
+          onClick={uploadVideos}
+        >
+          {uploading ? "正在上传与验证…" : `上传并预检（${uploadableCount}）`}
+        </button>
+      </div>
+      {disabled && <p className="muted local-import-disabled">当前链接预检完成后即可导入本地视频。</p>}
+    </section>
+  );
+}
+
+const PACKAGE_SUPPORTED_EXTENSIONS = new Set(["mp4", "mov", "mkv", "webm", "json", "csv", "db", "sqlite", "sqlite3"]);
+
+function PackageVideoImporter({
+  collections,
+  disabled,
+  rightsAttested,
+  setRightsAttested,
+  onBatchReady,
+  onUploadingChange,
+}: {
+  collections: Collection[];
+  disabled: boolean;
+  rightsAttested: boolean;
+  setRightsAttested: (value: boolean) => void;
+  onBatchReady: (batch: ImportBatch) => Promise<void>;
+  onUploadingChange: (value: boolean) => void;
+}) {
+  const suggestedCollectionId = collections.find((group) => group.key === "manual-import")?.id
+    ?? collections[0]?.id
+    ?? null;
+  const [mode, setMode] = useState<"folder" | "zip">("folder");
+  const [targetCollectionId, setTargetCollectionId] = useState<number | null>(suggestedCollectionId);
+  const [drafts, setDrafts] = useState<PackageFileDraft[]>([]);
+  const [activeBatch, setActiveBatch] = useState<ImportBatch | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [packageError, setPackageError] = useState("");
+  const onBatchReadyRef = useRef(onBatchReady);
+  const effectiveCollectionId = targetCollectionId ?? suggestedCollectionId;
+  const analyzing = Boolean(activeBatch && ["queued", "running"].includes(activeBatch.state));
+
+  useEffect(() => {
+    onBatchReadyRef.current = onBatchReady;
+  }, [onBatchReady]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ids = storedPackageBatches();
+    const latest = ids.at(-1);
+    if (!latest) return;
+    api.packageImportBatch(latest).then((value) => {
+      if (cancelled) return;
+      setActiveBatch(value);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!activeBatch || !["queued", "running"].includes(activeBatch.state)) return;
+    const timer = window.setTimeout(async () => {
+      try {
+        const next = await api.packageImportBatch(activeBatch.id);
+        setActiveBatch(next);
+        if (TERMINAL_BATCH_STATES.has(next.state) && next.items.length) {
+          await onBatchReadyRef.current(next);
+        }
+      } catch (value) {
+        setPackageError(reason(value, "读取数据包检测进度失败"));
+      }
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [activeBatch]);
+
+  function selectFiles(nextMode: "folder" | "zip", selected: File[]) {
+    setPackageError("");
+    setDrafts([]);
+    setMode(nextMode);
+    if (nextMode === "zip") {
+      const file = selected[0];
+      if (!file || !file.name.toLowerCase().endsWith(".zip")) {
+        setPackageError("请选择一个 ZIP 数据包");
+        setDrafts([]);
+        return;
+      }
+      if (file.size > 20 * 1024 * 1024 * 1024) {
+        setPackageError("ZIP 数据包不能超过 20 GB");
+        return;
+      }
+      setDrafts([{ clientFileId: crypto.randomUUID(), file, relativePath: file.name, status: "pending" }]);
+      return;
+    }
+    const supported = selected.filter((file) => PACKAGE_SUPPORTED_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() || ""));
+    const videoCount = supported.filter((file) => LOCAL_VIDEO_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() || "")).length;
+    if (!videoCount) {
+      setPackageError("所选文件夹中没有支持的视频（MP4/MOV/MKV/WebM）");
+      setDrafts([]);
+      return;
+    }
+    if (videoCount > 100) {
+      setPackageError("每批最多导入 100 个视频");
+      return;
+    }
+    if (supported.length > 1000) {
+      setPackageError("可识别文件超过 1000 个，请拆分后导入");
+      return;
+    }
+    const total = supported.reduce((sum, file) => sum + file.size, 0);
+    if (total > 20 * 1024 * 1024 * 1024) {
+      setPackageError("本批文件总大小超过 20 GB");
+      return;
+    }
+    const oversized = supported.find((file) => LOCAL_VIDEO_EXTENSIONS.has(file.name.split(".").pop()?.toLowerCase() || "") && file.size > LOCAL_VIDEO_MAX_BYTES);
+    if (oversized) {
+      setPackageError(`${oversized.name} 超过单视频 1 GB 上限`);
+      return;
+    }
+    setDrafts(supported.map((file) => ({
+      clientFileId: crypto.randomUUID(),
+      file,
+      relativePath: file.webkitRelativePath || file.name,
+      status: "pending",
+    })));
+  }
+
+  function updateDraft(clientFileId: string, change: Partial<PackageFileDraft>) {
+    setDrafts((current) => current.map((draft) => draft.clientFileId === clientFileId ? { ...draft, ...change } : draft));
+  }
+
+  async function uploadPackage() {
+    if (!rightsAttested || !drafts.length || uploading || disabled) return;
+    setUploading(true);
+    onUploadingChange(true);
+    setPackageError("");
+    try {
+      const canResume = activeBatch?.state === "uploading"
+        && activeBatch.package?.upload_mode === mode
+        && activeBatch.package_files?.length === drafts.length
+        && drafts.every((draft) => activeBatch.package_files?.some((entry) => entry.relative_path === draft.relativePath && entry.declared_size === draft.file.size));
+      const created = canResume ? activeBatch! : await api.createPackageImportBatch({
+        rights_attested: true,
+        upload_mode: mode,
+        ...(effectiveCollectionId != null ? { target_collection_id: effectiveCollectionId } : {}),
+        files: drafts.map((draft) => ({
+          client_file_id: draft.clientFileId,
+          relative_path: draft.relativePath,
+          size_bytes: draft.file.size,
+        })),
+      });
+      rememberPackageBatch(created.id);
+      setActiveBatch(created);
+      const serverFiles = new Map((created.package_files || []).map((entry) => [entry.relative_path, entry]));
+      let cursor = 0;
+      let failures = 0;
+      async function worker() {
+        while (cursor < drafts.length) {
+          const draft = drafts[cursor++];
+          const entry = serverFiles.get(draft.relativePath);
+          if (!entry) {
+            failures += 1;
+            updateDraft(draft.clientFileId, { status: "failed" });
+            continue;
+          }
+          if (entry.status === "uploaded" || entry.status === "analyzed") {
+            updateDraft(draft.clientFileId, { status: "uploaded" });
+            continue;
+          }
+          updateDraft(draft.clientFileId, { status: "uploading" });
+          try {
+            await api.uploadPackageImportFile(created.id, entry.id, draft.file);
+            updateDraft(draft.clientFileId, { status: "uploaded" });
+          } catch {
+            failures += 1;
+            updateDraft(draft.clientFileId, { status: "failed" });
+          }
+        }
+      }
+      await Promise.all([worker(), worker()]);
+      if (failures) {
+        setActiveBatch(await api.packageImportBatch(created.id));
+        setPackageError(`${failures} 个文件上传失败；保留当前页面后可再次点击续传`);
+        return;
+      }
+      const queued = await api.analyzePackageImportBatch(created.id);
+      setActiveBatch(queued);
+    } catch (value) {
+      setPackageError(reason(value, "创建数据包导入失败"));
+    } finally {
+      setUploading(false);
+      onUploadingChange(false);
+    }
+  }
+
+  const uploaded = drafts.filter((draft) => draft.status === "uploaded").length;
+  return (
+    <section className="card package-import-card">
+      <div className="section-head">
+        <div><span className="kicker">外部工具数据</span><h2>导入外部视频数据包</h2></div>
+        <small>支持文件夹或 ZIP · 最多 100 个视频 · 不访问抖音</small>
+      </div>
+      <p className="muted">可直接选择 F2 下载目录或 ZIP。后端会识别 `douyin_videos.db`、JSON、CSV 和文件名；识别不到元数据的视频会按本地视频导入。</p>
+      <div className="package-pickers">
+        <label className={mode === "folder" ? "selected" : ""}>
+          <strong>选择文件夹</strong><span>视频与元数据一起选择</span>
+          <input
+            type="file"
+            multiple
+            disabled={disabled || uploading || analyzing}
+            {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+            onChange={(event) => {
+              selectFiles("folder", Array.from(event.target.files || []));
+              event.target.value = "";
+            }}
+          />
+        </label>
+        <label className={mode === "zip" ? "selected" : ""}>
+          <strong>选择 ZIP</strong><span>自动安全解压与识别</span>
+          <input
+            type="file"
+            accept=".zip,application/zip"
+            disabled={disabled || uploading || analyzing}
+            onChange={(event) => {
+              selectFiles("zip", Array.from(event.target.files || []));
+              event.target.value = "";
+            }}
+          />
+        </label>
+        <label className="local-default-collection">
+          <span>默认收藏夹</span>
+          <select value={effectiveCollectionId ?? ""} disabled={uploading || !collections.length} onChange={(event) => setTargetCollectionId(event.target.value ? Number(event.target.value) : null)}>
+            {!collections.length && <option value="">暂无收藏夹</option>}
+            {collections.map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}
+          </select>
+        </label>
+      </div>
+      {!!drafts.length && (
+        <div className="package-summary">
+          <strong>{mode === "zip" ? drafts[0].file.name : `已识别 ${drafts.filter((draft) => LOCAL_VIDEO_EXTENSIONS.has(draft.file.name.split(".").pop()?.toLowerCase() || "")).length} 个视频`}</strong>
+          <span>{drafts.length} 个待上传文件 · {readableBytes(drafts.reduce((sum, draft) => sum + draft.file.size, 0))}</span>
+          {uploading && <span>已上传 {uploaded}/{drafts.length}</span>}
+        </div>
+      )}
+      {activeBatch && ["queued", "running"].includes(activeBatch.state) && (
+        <div className="package-analysis-status"><span className="pill running">检测中</span><strong>{activeBatch.package?.analysis_state || activeBatch.state}</strong><small>切换页面或关闭浏览器不会中断后端检测</small></div>
+      )}
+      {activeBatch && ["succeeded", "partial"].includes(activeBatch.state) && activeBatch.items.length > 0 && (
+        <div className="package-analysis-status"><span className={`pill ${activeBatch.state}`}>检测完成</span><strong>{activeBatch.items.filter((item) => item.status === "ready").length} 个视频可确认</strong><small>请在下方逐条核对并确认加入待入库</small></div>
+      )}
+      {activeBatch?.state === "failed" && (
+        <p className="local-import-error">{activeBatch.error_message || "数据包检测失败，请检查文件后重新选择"}</p>
+      )}
+      {activeBatch?.state === "uploading" && !drafts.length && (
+        <p className="muted">已恢复一个未完成上传的数据包。请重新选择同一个文件夹或 ZIP 后点击“续传并检测”。</p>
+      )}
+      {packageError && <p className="local-import-error">{packageError}</p>}
+      <div className="local-import-foot">
+        <label className="rights-attestation">
+          <input type="checkbox" checked={rightsAttested} disabled={uploading} onChange={(event) => setRightsAttested(event.target.checked)} />
+          <span>我确认有权处理这些视频文件，并授权 TokBrain 在本机检测、解析与后续 AI 入库。</span>
+        </label>
+        <button type="button" className="primary" disabled={!rightsAttested || !drafts.length || uploading || analyzing || disabled} onClick={uploadPackage}>
+          {uploading ? `上传中 ${uploaded}/${drafts.length}` : activeBatch?.state === "uploading" ? "续传并检测" : "上传并自动检测"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ImportWorkspace({
+  hidden,
   text,
   setText,
+  rightsAttested,
+  setRightsAttested,
   batch,
   retainedBatches,
   selected,
@@ -724,6 +1632,8 @@ function ImportWorkspace({
   onConfirm,
   onIngestConfirmed,
   onUpload,
+  onLocalBatchReady,
+  onEdit,
   onDelete,
   settings,
   usage,
@@ -731,8 +1641,11 @@ function ImportWorkspace({
   collections,
   confirmedWorkIds,
 }: {
+  hidden: boolean;
   text: string;
   setText: (value: string) => void;
+  rightsAttested: boolean;
+  setRightsAttested: (value: boolean) => void;
   batch: ImportBatch | null;
   retainedBatches: ImportBatch[];
   selected: Set<number>;
@@ -745,6 +1658,8 @@ function ImportWorkspace({
   onConfirm: (itemIds: number[]) => void;
   onIngestConfirmed: () => void;
   onUpload: (item: ImportItem, files: File[]) => void;
+  onLocalBatchReady: (batch: ImportBatch) => Promise<void>;
+  onEdit: (item: ImportItem, changes: ImportItemUpdate) => void;
   onDelete: (item: ImportItem) => void;
   settings: RuntimeSettings | null;
   usage: Usage | null;
@@ -752,9 +1667,20 @@ function ImportWorkspace({
   collections: Collection[];
   confirmedWorkIds: number[];
 }) {
-  const active = batch && !TERMINAL_BATCH_STATES.has(batch.state);
+  const [importerBusy, setImporterBusy] = useState(false);
+  const importerBusyRef = useRef(false);
+  const effectiveBusy = busy || (importerBusy ? "local-importer" : "");
+  function changeImporterBusy(value: boolean) {
+    importerBusyRef.current = value;
+    setImporterBusy(value);
+  }
+  const active = batch && !batchIsTerminal(batch);
   const completed = Number(batch?.progress.completed || 0);
   const percent = batch?.total_items ? Math.round((completed / batch.total_items) * 100) : 0;
+  const dailyIngestRemaining = Math.max(
+    0,
+    (settings?.import_daily_limit || 150) - (usage?.daily_works_used || 0),
+  );
   const rawDisplayItems = [
     ...retainedBatches.flatMap((entry) => entry.items),
     ...(batch?.items || []),
@@ -766,7 +1692,9 @@ function ImportWorkspace({
     (item, index, items) =>
       items.findIndex((candidate) => samePreviewWork(candidate, item)) === index,
   );
-  const selectable = displayItems.filter((item) => item.status === "ready");
+  const selectable = displayItems.filter((item) =>
+    item.status === "ready",
+  );
   const selectedVisibleIds = selectable
     .filter((item) => selected.has(item.id))
     .map((item) => item.id);
@@ -777,31 +1705,61 @@ function ImportWorkspace({
     setSelected(next);
   }
   return (
-    <section className="import-workspace stack">
+    <section className="import-workspace stack" hidden={hidden}>
       <div className="risk-notice" role="alert">
         <strong>导入风险提示</strong>
-        <p>仅当平台明确返回作者允许下载时才处理完整视频；禁止下载或状态未知时，不下载视频、不抽帧，只尝试字幕、独立音频或基础信息。单作品解析仍可能触发平台风控。</p>
+        <p>视频作品仅当平台明确返回作者允许下载时才处理完整视频；禁止下载或状态未知时，不下载视频、不抽帧。对您主动提交的公开图文作品，无论下载权限状态如何都会尝试取得并处理全部公开图片，但不会绕过登录、验证码或平台风控。本地素材只会在您确认有权处理后上传到本机服务。</p>
       </div>
       <section className="import-overview" aria-label="今日处理与知识库概况">
-        <span><small>今日处理</small><strong>{usage?.daily_links_used || 0}<em>/ {usage?.daily_links_limit || settings?.import_daily_limit || 150}</em></strong></span>
+        <span><small>今日处理</small><strong>{usage?.daily_works_used || 0}<em> 件</em></strong></span>
         <span><small>今日 AI 用量</small><strong>{(usage?.daily_llm_tokens_used || 0).toLocaleString()}<em>/ {(usage?.daily_llm_tokens_limit || 0).toLocaleString()}</em></strong></span>
         <span><small>已入库</small><strong>{summary.local_item_count.toLocaleString()}</strong></span>
         <span><small>待入库</small><strong>{summary.candidate_count.toLocaleString()}</strong></span>
       </section>
-      <form className="card import-form" onSubmit={onSubmit}>
+      <LocalVideoImporter
+        collections={collections}
+        disabled={Boolean(active) || Boolean(effectiveBusy)}
+        rightsAttested={rightsAttested}
+        setRightsAttested={setRightsAttested}
+        onBatchReady={onLocalBatchReady}
+        onUploadingChange={changeImporterBusy}
+      />
+      <PackageVideoImporter
+        collections={collections}
+        disabled={Boolean(active) || Boolean(effectiveBusy)}
+        rightsAttested={rightsAttested}
+        setRightsAttested={setRightsAttested}
+        onBatchReady={onLocalBatchReady}
+        onUploadingChange={changeImporterBusy}
+      />
+      <form className="card import-form" onSubmit={(event) => {
+        if (importerBusyRef.current) {
+          event.preventDefault();
+          return;
+        }
+        onSubmit(event);
+      }}>
         <div className="section-head">
-          <div><span className="kicker">批量粘贴</span><h2>添加公开作品链接</h2></div>
-          <small>每批最多 {settings?.import_batch_limit || 10} 条 · 每日最多 {settings?.import_daily_limit || 150} 条</small>
+          <div><span className="kicker">公开作品链接</span><h2>添加抖音作品链接</h2></div>
+          <small>每批最多 {settings?.import_batch_limit || 10} 条 · 预检后由您确认</small>
         </div>
         <textarea
           className="import-textarea"
+          aria-label="抖音作品链接，每行一个"
           value={text}
           onChange={(event) => setText(event.target.value)}
-          placeholder={"可直接粘贴整段分享文案或每行一个链接，例如：\nhttps://v.douyin.com/...\nhttps://www.douyin.com/video/..."}
+          placeholder={"每行粘贴一个抖音作品链接，例如：\nhttps://v.douyin.com/...\nhttps://www.douyin.com/video/..."}
         />
         <div className="import-form-foot">
-          <span>{text.length.toLocaleString()} 字符</span>
-          <button className="primary" disabled={!text.trim() || busy === "import" || !!active}>
+          <span>{text.length.toLocaleString()} 字符 · 只进行预检，不会自动入库</span>
+          <button
+            className="primary"
+            disabled={
+              !text.trim()
+              || Boolean(effectiveBusy)
+              || Boolean(active)
+            }
+          >
             {busy === "import" ? "正在创建队列…" : "开始预检"}
           </button>
         </div>
@@ -812,18 +1770,18 @@ function ImportWorkspace({
             <div className="section-head">
               <div><span className="kicker">解析进度</span><h2>{completed}/{batch.total_items} · {percent}%</h2></div>
               <div className="button-row">
-                {active && <button className="danger" disabled={busy === "cancel-batch"} onClick={onCancel}>{batch.state === "cancelling" ? "正在安全停止" : "中断解析"}</button>}
+                {active && <button className="danger" disabled={Boolean(effectiveBusy)} onClick={onCancel}>{batch.state === "cancelling" ? "正在安全停止" : "中断解析"}</button>}
                 <span className={`pill ${batch.state}`}>{stateLabel(batch.state)}</span>
               </div>
             </div>
-            <div className="batch-progress"><i style={{ width: `${percent}%` }} /></div>
+            <div className="batch-progress" role="progressbar" aria-label="导入预检进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}><i style={{ width: `${percent}%` }} /></div>
             <div className="batch-stats">
               <span>可确认 <strong>{batch.progress.ready || 0}</strong></span>
               <span>需补件 <strong>{batch.progress.needs_local_file || 0}</strong></span>
               <span>重复 <strong>{batch.progress.duplicates || 0}</strong></span>
               <span>失败 <strong>{batch.progress.failed || 0}</strong></span>
               <span>中断 <strong>{batch.progress.cancelled || 0}</strong></span>
-              <span>今日剩余 <strong>{batch.remaining_daily}</strong></span>
+              <span>今日入库剩余 <strong>{dailyIngestRemaining}</strong></span>
             </div>
           </>}
           {retainedBatches.length > 0 && (
@@ -841,12 +1799,25 @@ function ImportWorkspace({
             {displayItems.map((item) => (
               <article className={`import-result status-${item.status}`} key={item.id}>
                 <div className="result-select">
-                  {item.status === "ready" ? <input type="checkbox" checked={selected.has(item.id)} onChange={(event) => toggle(item.id, event.target.checked)} aria-label={`选择 ${item.title || item.input_url}`} /> : <span>{item.ordinal}</span>}
+                  {item.status === "ready" ? <input type="checkbox" disabled={Boolean(effectiveBusy)} checked={selected.has(item.id)} onChange={(event) => toggle(item.id, event.target.checked)} aria-label={`选择 ${item.title || item.input_url}`} /> : <span>{item.ordinal}</span>}
                 </div>
-                <div className="result-cover">{localAssetUrl(item.cover_url) ? <img src={localAssetUrl(item.cover_url)!} alt="" /> : <span>{item.kind === "image" ? "图文" : "链接"}</span>}</div>
+                <div className="result-cover">{localAssetUrl(item.cover_url) ? <img src={localAssetUrl(item.cover_url)!} alt="" /> : <span>{item.platform === "local" ? "本地" : item.kind === "image" ? "图文" : "链接"}</span>}</div>
                 <div className="result-body">
                   <div><span className={`pill ${item.status}`}>{itemStatus(item)}</span>{item.error_code && <code>{visibleErrorCode(item.error_code)}</code>}</div>
-                  <h3>{item.title || item.input_url}</h3>
+                  {item.platform === "local" && item.status === "ready" ? (
+                    <input
+                      className="result-title-input"
+                      defaultValue={item.title || ""}
+                      aria-label="本地视频标题"
+                      disabled={Boolean(effectiveBusy)}
+                      onBlur={(event) => {
+                        const title = event.target.value.trim();
+                        if (title && title !== item.title) onEdit(item, { title });
+                      }}
+                    />
+                  ) : (
+                    <h3>{item.title || item.input_url}</h3>
+                  )}
                   <p>{item.author_name || "作者待识别"}{item.duration_seconds > 0 ? ` · ${Math.round(item.duration_seconds)} 秒` : ""}</p>
                   <p className="muted">{mediaPolicyLabel(item)}</p>
                   {item.status === "ready" && (
@@ -854,11 +1825,16 @@ function ImportWorkspace({
                       <span>加入收藏夹</span>
                       <select
                         value={itemCollections.get(item.id) ?? manualCollectionId ?? ""}
+                        disabled={Boolean(effectiveBusy)}
                         onChange={(event) => {
                           const next = new Map(itemCollections);
-                          if (event.target.value) next.set(item.id, Number(event.target.value));
+                          const targetCollectionId = event.target.value ? Number(event.target.value) : null;
+                          if (targetCollectionId != null) next.set(item.id, targetCollectionId);
                           else next.delete(item.id);
                           setItemCollections(next);
+                          if (item.platform === "local") {
+                            onEdit(item, { target_collection_id: targetCollectionId });
+                          }
                         }}
                       >
                         {collections.map((group) => (
@@ -875,13 +1851,25 @@ function ImportWorkspace({
                     {["needs_local_file", "failed"].includes(item.status) && (
                       <label className="upload-action">
                         {busy === `upload-${item.id}` ? "正在验证…" : "上传本地补件"}
-                        <input type="file" multiple accept=".mp4,.mov,.mkv,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp" disabled={busy === `upload-${item.id}`} onChange={(event) => onUpload(item, Array.from(event.target.files || []))} />
+                        <input
+                          type="file"
+                          multiple={item.platform !== "local"}
+                          accept={item.platform === "local"
+                            ? ".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/webm,video/x-matroska"
+                            : ".mp4,.mov,.mkv,.webm,.jpg,.jpeg,.png,.webp,video/mp4,video/quicktime,video/webm,image/jpeg,image/png,image/webp"}
+                          disabled={Boolean(effectiveBusy)}
+                          onChange={(event) => {
+                            const files = Array.from(event.currentTarget.files || []);
+                            event.currentTarget.value = "";
+                            onUpload(item, files);
+                          }}
+                        />
                       </label>
                     )}
                     {!["queued", "resolving"].includes(item.status) && (
                       <button
                         className="danger"
-                        disabled={busy === `remove-preview-${item.id}`}
+                        disabled={Boolean(effectiveBusy)}
                         onClick={() => onDelete(item)}
                       >
                         {busy === `remove-preview-${item.id}` ? "删除中…" : "删除预检结果"}
@@ -914,7 +1902,7 @@ function ImportWorkspace({
                 {!!selectable.length && (
                   <button
                     className="link"
-                    disabled={!!busy}
+                    disabled={Boolean(effectiveBusy)}
                     onClick={() => setSelected(new Set(selectable.map((item) => item.id)))}
                   >
                     选择全部可确认项
@@ -923,7 +1911,7 @@ function ImportWorkspace({
                 {!!selectable.length && (
                   <button
                     className={confirmedWorkIds.length > 0 ? "secondary" : "primary"}
-                    disabled={!selectedVisibleIds.length || !!busy}
+                    disabled={!selectedVisibleIds.length || Boolean(effectiveBusy)}
                     onClick={() => onConfirm(selectedVisibleIds)}
                   >
                     {busy === "confirm"
@@ -947,792 +1935,4 @@ function ImportWorkspace({
       )}
     </section>
   );
-}
-
-function Library({
-  state,
-  setState,
-  collectionId,
-  setCollectionId,
-  collections,
-  summary,
-  page,
-  reload,
-  loadMore,
-  perform,
-  globalSummaryPrompt,
-}: {
-  state: LibraryState;
-  setState: (value: LibraryState) => void;
-  collectionId: number | null;
-  setCollectionId: (value: number | null) => void;
-  collections: Collection[];
-  summary: LibrarySummary;
-  page: WorksPage;
-  reload: () => Promise<void>;
-  loadMore: () => Promise<void>;
-  perform: (name: string, operation: () => Promise<unknown>, success: string) => Promise<boolean>;
-  globalSummaryPrompt: string;
-}) {
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [creatingCollection, setCreatingCollection] = useState(false);
-  const [newCollectionTitle, setNewCollectionTitle] = useState("");
-  const [targetCollectionId, setTargetCollectionId] = useState<number | null>(null);
-  const [editingCollectionPrompt, setEditingCollectionPrompt] = useState(false);
-  const activeCollection = collections.find((group) => group.id === collectionId);
-  const [collectionPromptDraft, setCollectionPromptDraft] = useState(
-    activeCollection?.summary_prompt || globalSummaryPrompt,
-  );
-  const selectedWorks = page.items.filter((work) => selected.has(work.id));
-  const canOrganize = state === "pending" || state === "in_library";
-  async function ingestSelected() {
-    if (!selected.size) return;
-    const count = selected.size;
-    if (await perform("ingest-selected", () => api.ingest([...selected]), `已创建 ${count} 个作品的入库任务`)) {
-      setSelected(new Set());
-      await reload();
-    }
-  }
-  async function summarize() {
-    if (!selected.size) return;
-    if (await perform("summarize", () => api.summarize([...selected]), `已创建 ${selected.size} 个作品的总结任务`)) setSelected(new Set());
-  }
-  async function exportNotes() {
-    if (!selected.size) return;
-    try {
-      const manifest = await api.obsidianManifest([...selected]);
-      const result = await exportToObsidian(manifest);
-      if (result.failed) throw new Error(result.messages.join("；"));
-      setSelected(new Set());
-    } catch (value) {
-      if (isUserCancelled(value)) return;
-      window.alert(reason(value, "导出失败"));
-    }
-  }
-  async function chooseImageFolder() {
-    await perform(
-      "obsidian-image-folder",
-      () => chooseObsidianImageDirectory(),
-      "Obsidian 图片统一存放位置已保存",
-    );
-  }
-  async function createCollection() {
-    const title = newCollectionTitle.trim();
-    if (!title) return;
-    let created: Collection | null = null;
-    const ok = await perform(
-      "create-collection",
-      async () => {
-        created = await api.createCollection(title);
-      },
-      `收藏夹“${title}”已创建`,
-    );
-    if (!ok) return;
-    setNewCollectionTitle("");
-    setCreatingCollection(false);
-    if (created) setTargetCollectionId((created as Collection).id);
-    await reload();
-  }
-  async function addToCollection() {
-    if (!targetCollectionId || !selected.size) return;
-    const target = collections.find((group) => group.id === targetCollectionId);
-    const ok = await perform(
-      "assign-collection",
-      () => api.addWorksToCollection(targetCollectionId, [...selected]),
-      `已加入收藏夹“${target?.title || "所选收藏夹"}”`,
-    );
-    if (!ok) return;
-    setSelected(new Set());
-    await reload();
-  }
-  async function saveCollectionPrompt(value: string | null = collectionPromptDraft) {
-    if (!activeCollection) return;
-    const prompt = value?.trim() || null;
-    const ok = await perform(
-      "collection-prompt",
-      () => api.updateCollectionSummaryPrompt(activeCollection.id, prompt),
-      prompt
-        ? `收藏夹“${activeCollection.title}”的专属总结提示词已保存`
-        : `收藏夹“${activeCollection.title}”已改用全局总结提示词`,
-    );
-    if (!ok) return;
-    setCollectionPromptDraft(prompt || "");
-    setEditingCollectionPrompt(false);
-    await reload();
-  }
-  return (
-    <section className="library-layout stack">
-      <div className="library-toolbar">
-        <div className="segmented">
-          <button className={state === "pending" ? "active" : ""} onClick={() => setState("pending")}>待处理 <em>{summary.candidate_count}</em></button>
-          <button className={state === "in_library" ? "active" : ""} onClick={() => setState("in_library")}>在库 <em>{summary.local_item_count}</em></button>
-          <button className={state === "issues" ? "active" : ""} onClick={() => setState("issues")}>异常 <em>{summary.issue_count}</em></button>
-          <button className={state === "archived" ? "active" : ""} onClick={() => setState("archived")}>已归档 <em>{summary.archived_count}</em></button>
-        </div>
-        <label className="collection-filter"><span>本地分组</span><select value={collectionId ?? ""} onChange={(event) => setCollectionId(event.target.value ? Number(event.target.value) : null)}><option value="">全部分组</option>{collections.map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}</select></label>
-      </div>
-      <div className="collection-head">
-        <div>
-          <span className="kicker">本地知识空间</span>
-          <h2>{collections.find((group) => group.id === collectionId)?.title || "全部作品"}</h2>
-          <p>{page.total} 个结果</p>
-        </div>
-        <div className="collection-head-actions">
-          {creatingCollection && (
-            <div className="collection-create">
-              <input
-                value={newCollectionTitle}
-                maxLength={100}
-                autoFocus
-                onChange={(event) => setNewCollectionTitle(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    createCollection();
-                  }
-                  if (event.key === "Escape") setCreatingCollection(false);
-                }}
-                placeholder="输入新收藏夹名称"
-              />
-              <button className="primary" disabled={!newCollectionTitle.trim()} onClick={createCollection}>创建</button>
-              <button className="link" onClick={() => setCreatingCollection(false)}>取消</button>
-            </div>
-          )}
-          <div className="button-row">
-            {state === "in_library" && (
-              <button className="secondary" onClick={chooseImageFolder}>设置图片统一存放位置</button>
-            )}
-            {canOrganize && <button className="secondary" onClick={() => setCreatingCollection((value) => !value)}>新建收藏夹</button>}
-            {activeCollection && (
-              <button
-                className="secondary"
-                onClick={() => {
-                  setCollectionPromptDraft(
-                    activeCollection.summary_prompt || globalSummaryPrompt,
-                  );
-                  setEditingCollectionPrompt((value) => !value);
-                }}
-              >
-                设置总结提示词
-              </button>
-            )}
-            {canOrganize && <button className="secondary" onClick={() => setSelected(new Set(page.items.map((work) => work.id)))}>选择当前页</button>}
-            {canOrganize && <button className="link" onClick={() => setSelected(new Set())}>取消选择</button>}
-          </div>
-        </div>
-      </div>
-      {activeCollection && editingCollectionPrompt && (
-        <section className="card collection-prompt-editor">
-          <div className="section-head">
-            <div>
-              <span className="kicker">收藏夹专属 AI 规则</span>
-              <h3>{activeCollection.title}</h3>
-            </div>
-            <small>{collectionPromptDraft.length.toLocaleString()} / 12,000</small>
-          </div>
-          <textarea
-            maxLength={12000}
-            value={collectionPromptDraft}
-            onChange={(event) => setCollectionPromptDraft(event.target.value)}
-            placeholder="请输入这个收藏夹专用的总结提示词"
-          />
-          <div className="collection-prompt-foot">
-            <small>
-              {activeCollection.summary_prompt
-                ? "当前使用收藏夹专属提示词。修改只影响之后新入库或重新生成的总结。"
-                : "当前继承全局提示词，已作为可编辑正文载入；保存后会成为这个收藏夹的专属提示词。"}
-            </small>
-            <div className="button-row">
-              <button className="link" onClick={() => saveCollectionPrompt(null)}>使用全局提示词</button>
-              <button className="primary" disabled={!collectionPromptDraft.trim()} onClick={() => saveCollectionPrompt()}>保存专属提示词</button>
-            </div>
-          </div>
-        </section>
-      )}
-      <div className="work-grid">
-        {page.items.map((work) => (
-          <article className={`work-card ${selected.has(work.id) ? "selected" : ""}`} key={work.id}>
-            {canOrganize && <label className="work-check"><input type="checkbox" checked={selected.has(work.id)} onChange={(event) => { const next = new Set(selected); if (event.target.checked) next.add(work.id); else next.delete(work.id); setSelected(next); }} /><span>选择</span></label>}
-            {localAssetUrl(work.cover_url) ? <img src={localAssetUrl(work.cover_url)!} alt="" loading="lazy" decoding="async" /> : <div className="cover-placeholder">{work.kind === "image" ? "图文" : "视频"}</div>}
-            <div className="work-body">
-              <span className="kicker">{work.kind === "image" ? "图文" : "视频"} · {work.library_state}</span>
-              <h3>{state === "in_library" ? <a className="work-title-link" href={`/works/${work.id}`}>{work.title}</a> : work.title}</h3>
-              <p>{work.author_name || "未知作者"}{work.duration_seconds ? ` · ${Math.round(work.duration_seconds)} 秒` : ""}</p>
-              {work.summary_excerpt && <p className="summary-excerpt">{work.summary_excerpt}</p>}
-              <p className="collection-tags">{work.collections.join(" · ")}</p>
-              <div className="work-actions">
-                {work.source_url && <a href={work.source_url} target="_blank" rel="noreferrer">查看公开原作品</a>}
-                {state === "pending" && <button onClick={() => perform("ingest-one", () => api.retry(work.id), "已创建入库任务").then(reload)}>开始入库</button>}
-                {state === "issues" && <button onClick={() => perform("retry", () => api.retry(work.id), "已创建重试任务").then(reload)}>重新处理</button>}
-                {state === "archived" && <button onClick={() => perform("restore", () => api.restore(work.id), "作品已恢复").then(reload)}>恢复</button>}
-                <button
-                  className="danger"
-                  onClick={() =>
-                    window.confirm("确认永久删除这个作品、总结、索引与本地资产？此操作不可恢复。")
-                    && perform(`remove-${work.id}`, () => api.remove(work.id), "作品已永久删除").then(reload)
-                  }
-                >
-                  永久删除
-                </button>
-              </div>
-              {(work.error_code || work.process_error) && <div className="technical-details" aria-label="技术详情"><span className="technical-details-title">技术详情</span>{work.error_code && <small className="error-code">{work.error_code}</small>}{work.process_error && <small className="work-error">{work.process_error}</small>}</div>}
-            </div>
-          </article>
-        ))}
-        {!page.items.length && <div className="empty"><strong>这个范围还没有作品</strong><p>前往“导入”粘贴您有权处理的公开作品链接。</p></div>}
-      </div>
-      {page.next_offset != null && <button className="secondary load-more" onClick={loadMore}>加载更多</button>}
-      {canOrganize && selectedWorks.length > 0 && (
-        <div className="selection-bar">
-          <div>
-            <strong>已选择 {selectedWorks.length} 个{state === "pending" ? "待处理" : "在库"}作品</strong>
-            <small>收藏夹关系会在作品完成 AI 处理后继续保留</small>
-          </div>
-          <div className="selection-actions">
-            <select value={targetCollectionId ?? ""} onChange={(event) => setTargetCollectionId(event.target.value ? Number(event.target.value) : null)}>
-              <option value="">选择目标收藏夹</option>
-              {collections.map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}
-            </select>
-            <button className="secondary" disabled={!targetCollectionId} onClick={addToCollection}>加入收藏夹</button>
-            {state === "pending" && <button className="primary" onClick={ingestSelected}>批量开始入库</button>}
-            {state === "in_library" && <button className="secondary" onClick={summarize}>补齐/更新总结</button>}
-            {state === "in_library" && <button className="primary" onClick={exportNotes}>导出到 Obsidian</button>}
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function Chat({
-  question,
-  setQuestion,
-  messages,
-  busy,
-  mode,
-  setMode,
-  initialFormat,
-  onSubmit,
-}: {
-  question: string;
-  setQuestion: (value: string) => void;
-  messages: Message[];
-  busy: boolean;
-  mode: "fast" | "deep";
-  setMode: (value: "fast" | "deep") => void;
-  initialFormat: RuntimeSettings["default_answer_format"];
-  onSubmit: (event: FormEvent) => void;
-}) {
-  return (
-    <section className="chat-layout">
-      <div className="chat-intro">
-        <span className="kicker">有来源的回答</span>
-        <h2>和本地知识库对话</h2>
-        <p>回答仅检索已确认并处理完成的作品，来源链接可追溯。</p>
-        <div className="mode-switch">
-          <button type="button" className={mode === "fast" ? "active" : ""} onClick={() => setMode("fast")}>快速回答</button>
-          <button type="button" className={mode === "deep" ? "active" : ""} onClick={() => setMode("deep")}>深度回答</button>
-        </div>
-        <small className="chat-format-hint">回答生成后可切换阅读排版、Markdown 和纯文本。</small>
-      </div>
-      <div className="conversation">
-        <div className="message-list">
-          {!messages.length && <div className="empty compact"><strong>问一个具体问题</strong><p>例如：“知识库中关于颈椎拉伸有哪些步骤？”</p></div>}
-          {messages.map((message) => (
-            <article className={`chat-message ${message.role} ${message.status || ""}`} key={message.id}>
-              {message.role === "assistant" && <span>TokBrain</span>}
-              {message.role === "assistant" && !message.status
-                ? <AnswerBlock content={message.content} initialFormat={initialFormat} />
-                : <p>{message.content}</p>}
-              {message.sources?.length ? (
-                <div className="sources">
-                  {message.sources.map((source) => (
-                    <article key={source.work_id}>
-                      <a href={`/works/${source.work_id}`}><strong>{source.title}</strong><small>{source.collection || "本地知识库"}</small></a>
-                      {source.external_url && <a href={source.external_url} target="_blank" rel="noreferrer">查看公开原作品</a>}
-                    </article>
-                  ))}
-                </div>
-              ) : null}
-            </article>
-          ))}
-        </div>
-        <form className="chat-form" onSubmit={onSubmit}>
-          <textarea
-            value={question}
-            onChange={(event) => setQuestion(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-              event.preventDefault();
-              if (!busy && question.trim()) event.currentTarget.form?.requestSubmit();
-            }}
-            placeholder="向本地知识库提问…"
-          />
-          <button className="primary" disabled={busy || !question.trim()}>{busy ? "正在回答" : "发送"}</button>
-        </form>
-      </div>
-    </section>
-  );
-}
-
-function ThemePicker() {
-  const { theme, themes, setTheme, backgroundIntensity, setBackgroundIntensity } = useTheme();
-  return (
-    <section className="card theme-picker">
-      <div className="section-head">
-        <div><span className="kicker">界面皮肤</span><h2>选择主题</h2></div>
-        <span className="theme-current"><b>{theme.mark}</b>{theme.name}</span>
-      </div>
-      <div className="theme-grid" role="radiogroup" aria-label="界面主题">
-        {themes.map((item) => (
-          <button
-            type="button"
-            role="radio"
-            aria-checked={item.id === theme.id}
-            className={`theme-card ${item.id === theme.id ? "selected" : ""}`}
-            key={item.id}
-            onClick={() => setTheme(item.id)}
-            style={themePreviewStyle(item)}
-          >
-            <span className="theme-preview"><span className="theme-badge">{item.mark}</span></span>
-            <span className="theme-card-copy"><strong>{item.name}</strong><small>{item.description}</small></span>
-          </button>
-        ))}
-      </div>
-      <label className="background-intensity">
-        <span><strong>背景显现度</strong><small>调整主题背景图的可见程度</small></span>
-        <input aria-label="背景显现度" type="range" min="0" max="100" value={backgroundIntensity} onChange={(event) => setBackgroundIntensity(Number(event.target.value))} />
-        <output>{backgroundIntensity}%</output>
-      </label>
-    </section>
-  );
-}
-
-function themePreviewStyle(theme: ThemeDefinition) {
-  return {
-    "--preview-bg": theme.preview[0],
-    "--preview-surface": theme.preview[1],
-    "--preview-accent": theme.preview[2],
-    "--preview-text": theme.preview[3],
-  } as CSSProperties;
-}
-
-const HEALTH_PROBE_NAMES = ["database", "media_runtime", "security_cleanup"] as const;
-
-function healthFromProbes(probes: Health["probes"]): Health {
-  const overall = probes.some((probe) => probe.status === "down")
-    ? "down"
-    : probes.some((probe) => probe.status === "degraded")
-      ? "degraded"
-      : "healthy";
-  return {
-    overall,
-    summary: overall === "healthy" ? "本地运行环境正常" : "部分本地处理能力需要处理",
-    checked_at: new Date().toISOString(),
-    probes,
-  };
-}
-
-function modelOptionLabel(model: string) {
-  const notes: Record<string, string> = {
-    "qwen3.6-flash": "低成本默认",
-    "qwen3.7-flash": "新一代轻量",
-    "qwen3.7-plus": "能力与成本均衡",
-    "qwen3.7-max": "高能力",
-    "qwen-math-turbo": "数学专项，仅建议用于对话",
-    "deepseek-r1-distill-qwen-7b": "推理蒸馏",
-    "deepseek-v4-flash": "第三方轻量",
-    "deepseek-v4-pro": "第三方高能力",
-    "glm-5": "第三方推理",
-    "glm-5.1": "第三方推理",
-    "glm-5.2": "第三方推理",
-  };
-  return notes[model] ? `${model}（${notes[model]}）` : model;
-}
-
-function Settings({
-  settings,
-  usage,
-  health,
-  onHealthChange,
-  busy,
-  perform,
-}: {
-  settings: RuntimeSettings;
-  usage: Usage | null;
-  health: Health | null;
-  onHealthChange: (health: Health) => void;
-  busy: string;
-  perform: (name: string, operation: () => Promise<unknown>, success: string) => Promise<boolean>;
-}) {
-  const [checking, setChecking] = useState(false);
-  const [checkProgress, setCheckProgress] = useState(health ? 100 : 0);
-  const [liveProbes, setLiveProbes] = useState<Health["probes"]>(health?.probes || []);
-  const [f2CookieDraft, setF2CookieDraft] = useState("");
-  const [billingAccessKeyIdDraft, setBillingAccessKeyIdDraft] = useState("");
-  const [billingAccessKeySecretDraft, setBillingAccessKeySecretDraft] = useState("");
-  const [summaryPromptDraft, setSummaryPromptDraft] = useState(settings.summary_prompt);
-
-  async function save(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const numeric = ["daily_media_minutes_limit", "daily_llm_token_limit", "monthly_warning_cny", "scene_threshold", "max_scene_candidates", "max_keyframes", "min_keyframe_gap_seconds"];
-    const body: Record<string, unknown> = {};
-    numeric.forEach((name) => body[name] = Number(form.get(name)));
-    ["dashscope_api_key", "bss_access_key_id", "bss_access_key_secret", "f2_cookie"].forEach((name) => { const value = String(form.get(name) || "").trim(); if (value) body[name] = value; });
-    ["processing_model", "chat_fast_model", "chat_deep_model"].forEach((name) => {
-      body[name] = String(form.get(name) || "");
-    });
-    body.clear_f2_cookie = form.get("clear_f2_cookie") === "on";
-    body.default_answer_format = String(form.get("default_answer_format") || "rich");
-    body.summary_prompt = summaryPromptDraft.trim() || settings.default_summary_prompt;
-    const saved = await perform("settings", () => api.saveSettings(body), "设置已保存");
-    if (saved) {
-      setBillingAccessKeyIdDraft("");
-      setBillingAccessKeySecretDraft("");
-    }
-  }
-
-  async function runHealthDetection() {
-    setChecking(true);
-    setCheckProgress(0);
-    setLiveProbes([]);
-    await perform(
-      "health-check",
-      async () => {
-        const nextProbes: Health["probes"] = [];
-        for (const [index, probeName] of HEALTH_PROBE_NAMES.entries()) {
-          const probe = await api.healthProbe(probeName);
-          nextProbes.push(probe);
-          setLiveProbes([...nextProbes]);
-          setCheckProgress(Math.round(((index + 1) / HEALTH_PROBE_NAMES.length) * 100));
-          // Keep each genuine probe result visible long enough to be perceived
-          // instead of flashing directly from 0% to 100% on fast local machines.
-          await new Promise((resolve) => window.setTimeout(resolve, 180));
-        }
-        onHealthChange(healthFromProbes(nextProbes));
-      },
-      "本地检测已完成",
-    );
-    setChecking(false);
-  }
-
-  async function saveF2Cookie() {
-    const value = f2CookieDraft.trim();
-    if (!value) return;
-    const saved = await perform(
-      "f2-cookie",
-      () => api.saveSettings({ f2_cookie: value, clear_f2_cookie: false }),
-      "解析 Cookie 已加密保存，可以返回导入页重新预检",
-    );
-    if (saved) setF2CookieDraft("");
-  }
-
-  async function saveBillingCredentials() {
-    const accessKeyId = billingAccessKeyIdDraft.trim();
-    const accessKeySecret = billingAccessKeySecretDraft.trim();
-    if (!accessKeyId && !accessKeySecret) return;
-    const saved = await perform(
-      "billing-credentials",
-      () => api.saveSettings({
-        ...(accessKeyId ? { bss_access_key_id: accessKeyId } : {}),
-        ...(accessKeySecret ? { bss_access_key_secret: accessKeySecret } : {}),
-      }),
-      "账单查询凭据已在本机后台加密保存",
-    );
-    if (saved) {
-      setBillingAccessKeyIdDraft("");
-      setBillingAccessKeySecretDraft("");
-    }
-  }
-
-  async function clearAllKeys() {
-    const confirmed = window.confirm(
-      "确定删除本机保存的全部百炼 API Key 和账单 AccessKey 吗？删除后 AI 处理、对话和官方账单查询将不可用，直至重新填写。",
-    );
-    if (!confirmed) return;
-    const cleared = await perform(
-      "clear-all-keys",
-      () => api.clearAllKeys(),
-      "全部模型 API Key 与账单 AccessKey 已删除",
-    );
-    if (cleared) {
-      setBillingAccessKeyIdDraft("");
-      setBillingAccessKeySecretDraft("");
-    }
-  }
-
-  async function saveSummaryPrompt(value = summaryPromptDraft) {
-    const prompt = value.trim();
-    if (!prompt) return;
-    await perform(
-      "summary-prompt",
-      () => api.saveSettings({ summary_prompt: prompt }),
-      "AI 总结提示词已保存，之后创建的总结任务将使用此内容",
-    );
-  }
-
-  async function resetSummaryPrompt() {
-    setSummaryPromptDraft(settings.default_summary_prompt);
-    await saveSummaryPrompt(settings.default_summary_prompt);
-  }
-
-  const activeProbeIndex = checking
-    ? Math.min(HEALTH_PROBE_NAMES.length - 1, liveProbes.length)
-    : -1;
-  const visibleProbes = checking ? liveProbes : liveProbes.length ? liveProbes : health?.probes || [];
-
-  return (
-    <div className="settings-layout">
-      <form className="stack" onSubmit={save}>
-        <ThemePicker />
-        {settings.security_cleanup_required && (
-          <section className="risk-notice"><strong>敏感残留尚未清理</strong><p>{settings.security_cleanup_message}</p></section>
-        )}
-        <section className="card principles-card">
-          <div className="principles-title"><span className="kicker">本地解析原则</span><h2>主动、低频、可中断</h2></div>
-          <div className="principles-inline" aria-label="本地解析原则详情">
-            <span>有权公开内容</span>
-            <span>预检不下载、不调用 AI</span>
-            <span>解析规则变化即失败</span>
-            <span>媒体缺失可补件</span>
-            <span>不绕过平台限制</span>
-          </div>
-        </section>
-        <section className="card">
-          <div className="section-head">
-            <div><span className="kicker">固定安全策略</span><h2>单作品访问护栏</h2></div>
-            <span className="pill succeeded">不可提高</span>
-          </div>
-          <div className="safety-grid">
-            <span>每批<strong>{settings.import_batch_limit}</strong></span>
-            <span>每日<strong>{settings.import_daily_limit}</strong></span>
-          </div>
-          <p className="muted">TokBrain 仅在您主动提交链接或确认入库后进行单作品解析；不会扫描账号或收藏夹，应用启动和本地检查不会访问抖音。</p>
-        </section>
-        <section className="card health-card">
-          <div className="section-head">
-            <div><span className="kicker">本地检查</span><h2>{health?.summary || "本地运行环境"}</h2></div>
-            <div className="health-detection">
-              <button type="button" className="secondary" disabled={checking || busy === "health-check"} onClick={runHealthDetection}>
-                {checking ? "检测中…" : "重新检测"}
-              </button>
-              <span>{checking ? `${checkProgress}%` : health ? "检测完成" : "尚未检测"}</span>
-            </div>
-          </div>
-          <div className="health-progress" aria-label="本地检测进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={checkProgress} role="progressbar">
-            <i style={{ width: `${checkProgress}%` }} />
-          </div>
-          <div className="probe-list">
-            {HEALTH_PROBE_NAMES.map((probeName, index) => {
-              const probe = visibleProbes.find((item) => item.probe === probeName);
-              const pendingState = checking && index === activeProbeIndex ? "checking" : "unknown";
-              return (
-                <div className="probe" key={probeName}>
-                  <span className={`signal ${probe?.status || pendingState}`} />
-                  <div>
-                    <strong>{probeName === "database" ? "本地数据库" : probeName === "media_runtime" ? "音视频工具" : "敏感数据清理"}</strong>
-                    <small>{probe?.message || (pendingState === "checking" ? "正在检测…" : "等待检测")}</small>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-        <section className="card">
-          <div className="section-head"><div><span className="kicker">处理额度</span><h2>媒体、AI 与费用</h2></div></div>
-          <div className="form-grid">
-            <Field name="daily_media_minutes_limit" label="每日媒体分钟" value={settings.daily_media_minutes_limit} min={1} />
-            <Field name="daily_llm_token_limit" label="每日 AI Token" value={settings.daily_llm_token_limit} min={1000} />
-            <Field name="monthly_warning_cny" label="月度费用预警" value={settings.monthly_warning_cny} min={0} step=".01" />
-            <Field name="scene_threshold" label="画面变化灵敏度" value={settings.scene_threshold} min={0.05} max={0.95} step=".05" />
-            <Field name="max_scene_candidates" label="初选画面上限" value={settings.max_scene_candidates} min={12} max={1000} />
-            <Field name="max_keyframes" label="最终保留画面" value={settings.max_keyframes} min={1} max={48} />
-            <Field name="min_keyframe_gap_seconds" label="画面最小间隔" value={settings.min_keyframe_gap_seconds} min={0.2} max={60} step=".1" />
-            <label className="field">
-              <span>回答默认格式</span>
-              <select name="default_answer_format" defaultValue={settings.default_answer_format}>
-                <option value="rich">阅读排版</option><option value="markdown">Markdown</option><option value="plain">纯文本</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>视频/图文总结模型</span>
-              <select name="processing_model" defaultValue={settings.processing_model}>
-                {settings.processing_model_options.map((model) => (
-                  <option key={model} value={model}>{modelOptionLabel(model)}</option>
-                ))}
-              </select>
-              <small>仅列出支持 JSON 结构化总结的文本生成模型；向量、重排、语音模型不能用于这里。</small>
-            </label>
-            <label className="field">
-              <span>快速回答模型</span>
-              <select name="chat_fast_model" defaultValue={settings.chat_fast_model}>
-                {settings.chat_model_options.map((model) => (
-                  <option key={model} value={model}>{modelOptionLabel(model)}</option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>深度回答模型</span>
-              <select name="chat_deep_model" defaultValue={settings.chat_deep_model}>
-                {settings.chat_model_options.map((model) => (
-                  <option key={model} value={model}>{modelOptionLabel(model)}</option>
-                ))}
-              </select>
-              <small>第三方或专项模型须先在百炼控制台开通；本地估算未覆盖的模型以官方账单为准。</small>
-            </label>
-            <div className="field model-readonly">
-              <span>固定专用模型</span>
-              <p>画面识别：{settings.ocr_model}<br />语音转写：{settings.asr_model}<br />向量检索：{settings.embedding_model}</p>
-            </div>
-            <div className="field wide summary-prompt-field">
-              <span>视频 AI 总结提示词</span>
-              <textarea
-                name="summary_prompt"
-                rows={18}
-                value={summaryPromptDraft}
-                onChange={(event) => setSummaryPromptDraft(event.target.value)}
-                placeholder="用于控制视频和图文入库后的 AI 总结方式"
-              />
-              <div className="prompt-field-actions">
-                <small>{summaryPromptDraft.length.toLocaleString()} / 12,000 字符；修改只影响之后新建或重新生成的总结</small>
-                <div className="button-row">
-                  <button type="button" className="link" disabled={busy === "summary-prompt"} onClick={resetSummaryPrompt}>一键恢复默认提示词</button>
-                  <button type="button" className="secondary" disabled={!summaryPromptDraft.trim() || busy === "summary-prompt"} onClick={() => saveSummaryPrompt()}>
-                    {busy === "summary-prompt" ? "保存中…" : "保存提示词"}
-                  </button>
-                </div>
-              </div>
-            </div>
-            <label className="field wide"><span>百炼模型密钥 {settings.has_dashscope_key && "（已保存，留空不修改）"}</span><input name="dashscope_api_key" type="password" autoComplete="off" /></label>
-            <div className="field wide cookie-field">
-              <span>可选解析 Cookie {settings.has_f2_cookie && "（已保存并生效）"}</span>
-              <textarea
-                name="f2_cookie"
-                rows={3}
-                autoComplete="off"
-                value={f2CookieDraft}
-                onChange={(event) => setF2CookieDraft(event.target.value)}
-                placeholder="粘贴完整 Cookie 后，必须点击下方“保存 Cookie”才会生效"
-              />
-              <div className="cookie-field-actions">
-                <small>{settings.has_f2_cookie ? "已保存；重新粘贴可覆盖旧 Cookie" : "尚未保存 Cookie"}</small>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!f2CookieDraft.trim() || busy === "f2-cookie"}
-                  onClick={saveF2Cookie}
-                >
-                  {busy === "f2-cookie" ? "保存中…" : "保存 Cookie"}
-                </button>
-              </div>
-            </div>
-            {settings.has_f2_cookie && <label className="field checkbox-field"><span>清除已保存的解析 Cookie</span><input name="clear_f2_cookie" type="checkbox" /></label>}
-            <label className="field">
-              <span>账单查询 AccessKey ID {settings.has_bss_credentials && "（后台已保存）"}</span>
-              <input
-                name="bss_access_key_id"
-                type="password"
-                autoComplete="off"
-                value={billingAccessKeyIdDraft}
-                onChange={(event) => setBillingAccessKeyIdDraft(event.target.value)}
-                placeholder={settings.has_bss_credentials ? "已加密保存；无需重新输入" : "请输入只读账单 AccessKey ID"}
-              />
-            </label>
-            <label className="field">
-              <span>账单查询 AccessKey Secret {settings.has_bss_credentials && "（后台已保存）"}</span>
-              <input
-                name="bss_access_key_secret"
-                type="password"
-                autoComplete="off"
-                value={billingAccessKeySecretDraft}
-                onChange={(event) => setBillingAccessKeySecretDraft(event.target.value)}
-                placeholder={settings.has_bss_credentials ? "已加密保存；不会回显完整密钥" : "请输入只读账单 AccessKey Secret"}
-              />
-            </label>
-            <div className="field wide billing-credentials-status">
-              <span>账单凭据保存状态</span>
-              <div>
-                <small>
-                  {settings.has_bss_credentials
-                    ? "AccessKey ID 与 Secret 已保存在本机后台，退出页面或重启应用后仍然有效。为避免泄露，密码框不会显示原文。"
-                    : "尚未保存账单凭据。请同时填写 ID 与 Secret 后点击右侧按钮。"}
-                </small>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={
-                    (!billingAccessKeyIdDraft.trim() && !billingAccessKeySecretDraft.trim())
-                    || (!settings.has_bss_credentials && (!billingAccessKeyIdDraft.trim() || !billingAccessKeySecretDraft.trim()))
-                    || busy === "billing-credentials"
-                  }
-                  onClick={saveBillingCredentials}
-                >
-                  {busy === "billing-credentials" ? "保存中…" : settings.has_bss_credentials ? "更新账单凭据" : "保存账单凭据"}
-                </button>
-              </div>
-            </div>
-            <div className="field wide billing-summary">
-              <span>本月账单</span>
-              <div className="billing-summary-grid">
-                <span>
-                  <small>TokBrain 本地估算</small>
-                  <strong>¥ {(usage?.month_estimated_cny || 0).toFixed(4)}</strong>
-                </span>
-                <span>
-                  <small>阿里云官方账单</small>
-                  <strong>{usage?.official_billed_cny == null ? "尚未查询" : `¥ ${usage.official_billed_cny.toFixed(4)}`}</strong>
-                </span>
-                <span>
-                  <small>官方账单状态</small>
-                  <strong>{
-                    usage?.official_status === "available_delayed"
-                      ? "已获取（存在结算延迟）"
-                      : usage?.official_status === "error"
-                        ? "查询失败"
-                        : "尚未查询"
-                  }</strong>
-                </span>
-                <span>
-                  <small>官方数据更新时间</small>
-                  <strong>{usage?.official_data_as_of ? new Date(usage.official_data_as_of).toLocaleString("zh-CN") : "—"}</strong>
-                </span>
-              </div>
-            </div>
-            <div className="field wide billing-refresh">
-              <span>官方账单核对</span>
-              <div>
-                <small>凭据保存后可直接刷新；官方数据通常有约 24 小时结算延迟，可能与本地实时估算不同。</small>
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!settings.has_bss_credentials || busy === "official-bill"}
-                  onClick={() => perform("official-bill", () => api.refreshOfficialBill(), "官方账单已刷新")}
-                >
-                  {busy === "official-bill" ? "查询中…" : "刷新官方账单"}
-                </button>
-              </div>
-            </div>
-          </div>
-          <p className="muted">{settings.dpapi_warning}</p>
-          <p className="muted">今日公开链接 {usage?.daily_links_used || 0}/{usage?.daily_links_limit || 150} · 今日 AI {(usage?.daily_llm_tokens_used || 0).toLocaleString()}/{(usage?.daily_llm_tokens_limit || 0).toLocaleString()}</p>
-        </section>
-        <section className="card credential-cleanup">
-          <div>
-            <span className="kicker">敏感凭据清理</span>
-            <h2>删除全部 API Key 与 AccessKey</h2>
-            <p className="muted">删除百炼模型 API Key、账单 AccessKey ID/Secret 及已缓存的官方账单；不会删除知识库、作品、总结或解析 Cookie。</p>
-          </div>
-          <button type="button" className="danger" disabled={busy === "clear-all-keys"} onClick={clearAllKeys}>
-            {busy === "clear-all-keys" ? "删除中…" : "删除全部密钥"}
-          </button>
-        </section>
-        <button className="primary save" disabled={busy === "settings"}>{busy === "settings" ? "保存中…" : "保存设置"}</button>
-      </form>
-    </div>
-  );
-}
-
-function Field({ name, label, value, min, max, step = "1" }: { name: string; label: string; value: number; min: number; max?: number; step?: string }) {
-  return <label className="field"><span>{label}</span><div className="field-control"><input name={name} type="number" defaultValue={value} min={min} max={max} step={step} /></div></label>;
 }
