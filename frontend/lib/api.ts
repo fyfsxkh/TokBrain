@@ -16,6 +16,7 @@ export type {
   ChatStreamEvent,
   ChatTurn,
   Collection,
+  CustomTheme,
   Health,
   ImportBatch,
   ImportBatchCreated,
@@ -34,6 +35,7 @@ export type {
   Probe,
   RuntimeSettings,
   RuntimeSettingsUpdate,
+  ThemePalette,
   Usage,
   Work,
   WorkSupplementResult,
@@ -215,6 +217,38 @@ class LocalApiClient {
 
   usage(): Promise<Contract.Usage> {
     return this.request("/api/settings/usage");
+  }
+
+  themes(): Promise<Contract.CustomTheme[]> {
+    return this.request<{ items: Contract.CustomTheme[] }>("/api/themes").then((value) => value.items);
+  }
+
+  createTheme(
+    name: string,
+    sourceThemeId: string,
+    palette: Contract.ThemePalette,
+    file?: File | null,
+  ): Promise<Contract.CustomTheme> {
+    const body = new FormData();
+    body.append("name", name);
+    body.append("source_theme_id", sourceThemeId);
+    body.append("palette_json", JSON.stringify(palette));
+    if (file) body.append("file", file, file.name);
+    return this.request("/api/themes", { method: "POST", body }, UPLOAD_REQUEST_TIMEOUT_MS);
+  }
+
+  updateTheme(
+    id: string,
+    body: { name?: string; palette?: Contract.ThemePalette },
+  ): Promise<Contract.CustomTheme> {
+    return this.request(`/api/themes/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  deleteTheme(id: string): Promise<{ id: string; deleted: boolean; files_removed: boolean }> {
+    return this.request(`/api/themes/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   refreshOfficialBill(): Promise<{ status: string; message: string }> {

@@ -20,6 +20,39 @@ export type Health = {
   probes: Probe[];
 };
 
+export type ThemePalette = {
+  page: string;
+  sidebar: string;
+  surface: string;
+  surfaceAlt: string;
+  border: string;
+  text: string;
+  muted: string;
+  primary: string;
+  secondary: string;
+  success: string;
+  warning: string;
+  danger: string;
+};
+
+export type CustomTheme = {
+  id: string;
+  name: string;
+  source_theme_id: string;
+  media_kind: "inherited" | "static" | "dynamic";
+  mime_type: string | null;
+  size_bytes: number;
+  sha256: string | null;
+  width: number;
+  height: number;
+  duration_seconds: number;
+  palette: ThemePalette;
+  content_url: string | null;
+  poster_url: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type RuntimeSettings = {
   daily_media_minutes_limit: number;
   daily_llm_token_limit: number;

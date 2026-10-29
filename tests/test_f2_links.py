@@ -179,7 +179,22 @@ async def test_optional_cookie_is_forwarded_without_account_verification():
     assert seen == "sessionid=optional"
 
 
-async def test_f2_adapter_performs_one_internal_attempt(monkeypatch):
+@pytest.mark.parametrize(
+    ("cookie", "expected_uifid"),
+    [
+        ("", None),
+        ("sessionid=optional", None),
+        ("sessionid=optional; UIFID=browser-id", "browser-id"),
+        ("UIFID_TEMP=guest-id", "guest-id"),
+        ("UIFID_TEMP=guest-id; UIFID=browser-id", "browser-id"),
+        ("UIFID=; UIFID_TEMP=guest-id", "guest-id"),
+        ('  UIFID="quoted-id"; sessionid=optional  ', "quoted-id"),
+        ("bad@name=value", None),
+    ],
+)
+async def test_f2_adapter_sends_gateway_headers_in_one_attempt(
+    monkeypatch, cookie, expected_uifid
+):
     from f2.apps.douyin import crawler as crawler_module
 
     seen: dict = {}
@@ -200,11 +215,19 @@ async def test_f2_adapter_performs_one_internal_attempt(monkeypatch):
 
     monkeypatch.setattr(crawler_module, "DouyinCrawler", FakeCrawler)
 
-    payload = await F2WorkClient()._fetch_detail(VIDEO_ID, "sessionid=optional")
+    payload = await F2WorkClient()._fetch_detail(VIDEO_ID, cookie)
 
     assert payload["status_code"] == 0
     assert seen["params"]["aweme_id"] == VIDEO_ID
     assert seen["kwargs"]["max_retries"] == 1
+    assert seen["kwargs"]["cookie"] == cookie.strip()
+    headers = seen["kwargs"]["headers"]
+    assert headers["x-tt-argus"] == "1"
+    assert headers.get("uifid") == expected_uifid
+    assert ("uifid" in headers) is (expected_uifid is not None)
+    assert headers["Referer"] == "https://www.douyin.com/"
+    assert "Chrome/130.0.0.0" in headers["User-Agent"]
+    assert "sessionid" not in headers
 
 
 def test_non_json_f2_response_is_not_reported_as_unavailable_work():

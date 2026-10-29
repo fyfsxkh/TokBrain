@@ -55,6 +55,10 @@ source-assets/
 *.vtt
 *.ass
 
+# Bundled, reviewed dynamic-theme loops are release assets rather than user media.
+!frontend/public/themes/dynamic/*.mp4
+!frontend/public/themes/dynamic/*.webm
+
 # Local agent/editor state
 .agents/
 .codex/

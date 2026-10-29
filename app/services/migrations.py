@@ -18,7 +18,7 @@ from app.models import Base
 
 DB_PATH = DATA_DIR / "douyin_rag.db"
 SCHEMA_KEY = "schema"
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 REMOVED_SETTING_KEYS = {
     "active_account",
     "adapter_health_state",
@@ -71,7 +71,7 @@ def backup_before_upgrade(path: Path = DB_PATH) -> Path | None:
         return None
     backup_dir = path.parent / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    target = backup_dir / f"douyin_rag-pre-v9-{datetime.now():%Y%m%d-%H%M%S}.db"
+    target = backup_dir / f"douyin_rag-pre-v10-{datetime.now():%Y%m%d-%H%M%S}.db"
     source = sqlite3.connect(path)
     destination = sqlite3.connect(target)
     try:
@@ -634,6 +634,60 @@ def migrate_to_v9(path: Path = DB_PATH) -> None:
         connection.close()
 
 
+def migrate_to_v10(path: Path = DB_PATH) -> None:
+    """Add durable custom semantic palettes and local wallpaper metadata."""
+
+    if not path.exists() or _schema_version(path) >= 10:
+        return
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_themes (
+              id VARCHAR(36) PRIMARY KEY,
+              name VARCHAR(80) NOT NULL,
+              source_theme_id VARCHAR(80) NOT NULL,
+              media_kind VARCHAR(20) NOT NULL DEFAULT 'inherited',
+              mime_type VARCHAR(100),
+              stored_path TEXT,
+              poster_path TEXT,
+              size_bytes INTEGER NOT NULL DEFAULT 0,
+              sha256 VARCHAR(64),
+              width INTEGER NOT NULL DEFAULT 0,
+              height INTEGER NOT NULL DEFAULT 0,
+              duration_seconds FLOAT NOT NULL DEFAULT 0,
+              palette JSON NOT NULL DEFAULT '{}',
+              created_at DATETIME NOT NULL,
+              updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_custom_themes_source_theme_id "
+            "ON custom_themes(source_theme_id)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_custom_themes_sha256 "
+            "ON custom_themes(sha256)"
+        )
+        connection.execute(
+            """
+            INSERT INTO app_settings(key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (
+                SCHEMA_KEY,
+                json.dumps({"version": 10}),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        connection.execute("PRAGMA optimize")
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def cleanup_legacy_browser_profile() -> bool:
     profile = DATA_DIR / "browser-profile"
     if not profile.exists():
@@ -715,6 +769,7 @@ def prepare_database(path: Path = DB_PATH) -> Path | None:
     migrate_to_v7(path)
     migrate_to_v8(path)
     migrate_to_v9(path)
+    migrate_to_v10(path)
     persist_security_cleanup_state(path)
     return backup
 

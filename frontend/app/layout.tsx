@@ -17,6 +17,7 @@ import "../themes/styles/sakura-valley.css";
 import "../themes/styles/volcanic-forge.css";
 
 import { ThemeProvider } from "../themes/ThemeProvider";
+import { ThemeBackdrop } from "../themes/ThemeBackdrop";
 import {
   BACKGROUND_INTENSITY_STORAGE_KEY,
   backgroundOverlayOpacity,
@@ -34,9 +35,9 @@ const themeBootScript = `(()=>{const d=document.documentElement;const fallback=$
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="zh-CN" data-theme={DEFAULT_THEME_ID} data-theme-tone="dark" suppressHydrationWarning>
+    <html lang="zh-CN" data-theme={DEFAULT_THEME_ID} data-theme-tone="dark" data-wallpaper-source="builtin-static" suppressHydrationWarning>
       <head><script dangerouslySetInnerHTML={{ __html: themeBootScript }} /></head>
-      <body><ThemeProvider>{children}</ThemeProvider></body>
+      <body><ThemeProvider><ThemeBackdrop />{children}</ThemeProvider></body>
     </html>
   );
 }

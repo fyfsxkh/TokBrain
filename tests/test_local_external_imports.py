@@ -611,7 +611,7 @@ async def test_external_commit_reports_partial_results_and_cross_batch_duplicate
 def test_openapi_exposes_contract_v7_import_routes():
     schema = app.openapi()
     paths = schema["paths"]
-    assert API_CONTRACT_VERSION == 7
+    assert API_CONTRACT_VERSION == 8
     assert "/api/package-import-batches" in paths
     assert "/api/local-import-batches" in paths
     assert "/api/integrations/v1/import-batches" in paths

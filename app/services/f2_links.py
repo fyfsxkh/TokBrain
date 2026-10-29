@@ -11,6 +11,7 @@ import re
 import socket
 import sys
 from dataclasses import dataclass, field
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TypeVar
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -591,6 +592,23 @@ def _parse_f2_response(
 DetailFetcher = Callable[[str, str], Awaitable[dict[str, Any]]]
 
 
+def _f2_gateway_headers(cookie: str) -> dict[str, str]:
+    # Backport F2's gateway compatibility fix (Johnserf-Seed/f2@9b759fc).
+    # Keep these headers scoped to the single-post API, alongside its Cookie.
+    headers = {"x-tt-argus": "1"}
+    values = SimpleCookie()
+    try:
+        values.load(cookie)
+    except CookieError:
+        return headers
+    for name in ("UIFID", "UIFID_TEMP"):
+        value = values.get(name)
+        if value and value.value:
+            headers["uifid"] = value.value
+            break
+    return headers
+
+
 class F2WorkClient:
     """Resolve one submitted link; never calls F2 account or collection APIs."""
 
@@ -705,6 +723,7 @@ class F2WorkClient:
                     "Chrome/130.0.0.0 Safari/537.36"
                 ),
                 "Referer": "https://www.douyin.com/",
+                **_f2_gateway_headers(cookie.strip()),
             },
             "proxies": {"http://": None, "https://": None},
             "timeout": LINK_TIMEOUT_SECONDS,

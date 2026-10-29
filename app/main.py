@@ -25,6 +25,7 @@ from app.routers_v2 import (
     jobs,
     library,
     package_imports,
+    themes,
 )
 from app.routers_v2 import settings as settings_routes
 from app.services.import_queue import coordinator as import_coordinator
@@ -49,7 +50,7 @@ _configure_safe_logging()
 
 
 APP_VERSION = "1.0.0"
-API_CONTRACT_VERSION = 7
+API_CONTRACT_VERSION = 8
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _LOCAL_HOSTS = ["127.0.0.1", "localhost", "testserver"]
 _ROUTERS = (
@@ -61,6 +62,7 @@ _ROUTERS = (
     library.router,
     chat.router,
     settings_routes.router,
+    themes.router,
 )
 
 

@@ -177,3 +177,114 @@ export function getTheme(value: unknown): ThemeDefinition {
     ? themeMap.get(value)!
     : themeMap.get(DEFAULT_THEME_ID)!;
 }
+
+export const PALETTE_FIELDS = [
+  "page",
+  "sidebar",
+  "surface",
+  "surfaceAlt",
+  "border",
+  "text",
+  "muted",
+  "primary",
+  "secondary",
+  "success",
+  "warning",
+  "danger",
+] as const;
+
+export type PaletteField = (typeof PALETTE_FIELDS)[number];
+export type ThemePalette = Record<PaletteField, string>;
+
+const PALETTES: Record<ThemeId, ThemePalette> = {
+  "classic-night": { page: "#0D1013", sidebar: "#0C0F12", surface: "#15191D", surfaceAlt: "#1B2025", border: "#2A3036", text: "#F4F1EA", muted: "#9BA3AA", primary: "#36F0E0", secondary: "#FF315F", success: "#36F0E0", warning: "#FFBD59", danger: "#FF665F" },
+  "dragonbone-biopunk": { page: "#0C0D0F", sidebar: "#08090A", surface: "#151313", surfaceAlt: "#201818", border: "#4B3B32", text: "#E8DFCF", muted: "#A99B8B", primary: "#FF5B55", secondary: "#FF315A", success: "#FF5B55", warning: "#FFB347", danger: "#FF4A52" },
+  "aether-sky-city": { page: "#EDF3F7", sidebar: "#FFFDF8", surface: "#FFFDF8", surfaceAlt: "#EDF8FD", border: "#D8C9AE", text: "#12233C", muted: "#64778B", primary: "#1DAEDB", secondary: "#EF7B67", success: "#1DAEDB", warning: "#B99146", danger: "#C74C42" },
+  "abyssal-runepunk": { page: "#031219", sidebar: "#010E14", surface: "#071C23", surfaceAlt: "#0A2931", border: "#24505A", text: "#E8F3EF", muted: "#87AEB2", primary: "#35F2E6", secondary: "#8A5CFF", success: "#35F2E6", warning: "#D7CDB7", danger: "#FF765B" },
+  "paper-organizer": { page: "#F8F6F0", sidebar: "#FAF8F2", surface: "#FFFEFA", surfaceAlt: "#F1EEE6", border: "#E0DBCF", text: "#292929", muted: "#716F6B", primary: "#648D7C", secondary: "#CC7F78", success: "#648D7C", warning: "#D4A373", danger: "#BA5952" },
+  "ocean-dawn": { page: "#041B36", sidebar: "#031C35", surface: "#0A3852", surfaceAlt: "#0E4964", border: "#467C85", text: "#F4FBFF", muted: "#AFD0DB", primary: "#28D8D1", secondary: "#7CB8D8", success: "#28D8D1", warning: "#F0C67D", danger: "#FF7A6B" },
+  "sunset-cloudsea": { page: "#171A3D", sidebar: "#161230", surface: "#2B203D", surfaceAlt: "#3A2848", border: "#735A61", text: "#FFF0DF", muted: "#D0B8C8", primary: "#FFB36B", secondary: "#FF6F9D", success: "#FFB36B", warning: "#FFD18F", danger: "#FF6F61" },
+  "aurora-snowfield": { page: "#071426", sidebar: "#031226", surface: "#0A2340", surfaceAlt: "#0D2D4D", border: "#416477", text: "#F3FBFF", muted: "#A9C8D8", primary: "#61E9E2", secondary: "#8F62FF", success: "#38F29A", warning: "#38F29A", danger: "#FF767D" },
+  "eastern-mist": { page: "#F5F1E7", sidebar: "#F3F4ED", surface: "#FBF9F2", surfaceAlt: "#EDF1EB", border: "#D8D4C8", text: "#1F2925", muted: "#68736D", primary: "#426B5A", secondary: "#A65B50", success: "#426B5A", warning: "#8BA887", danger: "#A74D45" },
+  "moss-forest": { page: "#071D18", sidebar: "#021D17", surface: "#103127", surfaceAlt: "#153F31", border: "#45624A", text: "#F3E9CE", muted: "#B4C4A5", primary: "#62D8C7", secondary: "#9BBF63", success: "#62D8C7", warning: "#F0C87A", danger: "#E9796F" },
+  "desert-observatory": { page: "#10142C", sidebar: "#080C1F", surface: "#181C34", surfaceAlt: "#22243D", border: "#67583E", text: "#EFE2C4", muted: "#B9AD9E", primary: "#D8A657", secondary: "#7658D8", success: "#D8A657", warning: "#EFC985", danger: "#E97161" },
+  "sakura-valley": { page: "#EDE8EE", sidebar: "#232946", surface: "#FFF9F7", surfaceAlt: "#EBEAF3", border: "#B8B8C2", text: "#24324C", muted: "#66728A", primary: "#E985A4", secondary: "#F3B6C6", success: "#5B8C7B", warning: "#F2A985", danger: "#CE5D73" },
+  "volcanic-forge": { page: "#0C0E12", sidebar: "#080A0D", surface: "#171A1E", surfaceAlt: "#20252B", border: "#3D434A", text: "#F2F2EF", muted: "#A8ADB3", primary: "#FF6A1A", secondary: "#E23D2D", success: "#FF6A1A", warning: "#FFC14D", danger: "#FF4938" },
+};
+
+export function getThemePalette(id: ThemeId): ThemePalette {
+  return { ...PALETTES[id] };
+}
+
+export function paletteTone(palette: ThemePalette): ThemeTone {
+  const value = palette.page.slice(1);
+  const channels = [0, 2, 4].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16) / 255);
+  const linear = channels.map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  const luminance = linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+  return luminance > 0.42 ? "light" : "dark";
+}
+
+export const DYNAMIC_THEME_IDS = [
+  "sakura-valley-motion",
+  "ocean-dawn-motion",
+  "aurora-snowfield-motion",
+] as const;
+
+export type DynamicThemeId = (typeof DYNAMIC_THEME_IDS)[number];
+
+export type DynamicThemeDefinition = {
+  id: DynamicThemeId;
+  name: string;
+  description: string;
+  baseThemeId: ThemeId;
+  mark: string;
+  poster: string;
+  sources: readonly { src: string; type: "video/mp4" | "video/webm" }[];
+};
+
+export const DYNAMIC_THEMES: readonly DynamicThemeDefinition[] = [
+  {
+    id: "sakura-valley-motion",
+    name: "樱花溪谷·流风",
+    description: "晨雾、水光与落樱的无声循环",
+    baseThemeId: "sakura-valley",
+    mark: "花",
+    poster: "/themes/dynamic/sakura-valley-poster.webp",
+    sources: [
+      { src: "/themes/dynamic/sakura-valley.webm", type: "video/webm" },
+      { src: "/themes/dynamic/sakura-valley.mp4", type: "video/mp4" },
+    ],
+  },
+  {
+    id: "ocean-dawn-motion",
+    name: "海洋晨光·潮汐",
+    description: "海面呼吸、晨光游移的安静循环",
+    baseThemeId: "ocean-dawn",
+    mark: "潮",
+    poster: "/themes/ocean-dawn.webp",
+    sources: [
+      { src: "/themes/dynamic/ocean-dawn.webm", type: "video/webm" },
+      { src: "/themes/dynamic/ocean-dawn.mp4", type: "video/mp4" },
+    ],
+  },
+  {
+    id: "aurora-snowfield-motion",
+    name: "极光雪原·流光",
+    description: "极光舒展、雪粒轻落的夜空循环",
+    baseThemeId: "aurora-snowfield",
+    mark: "光",
+    poster: "/themes/aurora-snowfield.webp",
+    sources: [
+      { src: "/themes/dynamic/aurora-snowfield.webm", type: "video/webm" },
+      { src: "/themes/dynamic/aurora-snowfield.mp4", type: "video/mp4" },
+    ],
+  },
+] as const;
+
+export function isDynamicThemeId(value: unknown): value is DynamicThemeId {
+  return typeof value === "string" && DYNAMIC_THEME_IDS.includes(value as DynamicThemeId);
+}
+
+export function getDynamicTheme(value: unknown): DynamicThemeDefinition | null {
+  return DYNAMIC_THEMES.find((item) => item.id === value) || null;
+}

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -27,7 +27,8 @@ import { mergeWorksPage } from "../lib/libraryPagination.ts";
 const pageShell = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 const libraryComponent = await readFile(new URL("../components/Library.tsx", import.meta.url), "utf8");
 const settingsComponent = await readFile(new URL("../components/Settings.tsx", import.meta.url), "utf8");
-const page = [pageShell, libraryComponent, settingsComponent].join("\n");
+const themePickerComponent = await readFile(new URL("../components/ThemePicker.tsx", import.meta.url), "utf8");
+const page = [pageShell, libraryComponent, settingsComponent, themePickerComponent].join("\n");
 const chatComponent = await readFile(new URL("../components/Chat.tsx", import.meta.url), "utf8");
 const api = await readFile(new URL("../lib/api.ts", import.meta.url), "utf8");
 const contracts = await readFile(new URL("../lib/contracts.ts", import.meta.url), "utf8");
@@ -37,6 +38,7 @@ const assets = await readFile(new URL("../lib/assets.ts", import.meta.url), "utf
 const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const themeRegistry = await readFile(new URL("../themes/registry.ts", import.meta.url), "utf8");
 const themeProvider = await readFile(new URL("../themes/ThemeProvider.tsx", import.meta.url), "utf8");
+const themeBackdrop = await readFile(new URL("../themes/ThemeBackdrop.tsx", import.meta.url), "utf8");
 const themeBaseStyles = await readFile(new URL("../themes/styles/base.css", import.meta.url), "utf8");
 const packageManifest = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -74,7 +76,8 @@ test("page delegates library and settings UI to dependency-safe components", () 
   assert.doesNotMatch(pageShell, /function ThemePicker\(/);
   assert.match(libraryComponent, /export function Library\(/);
   assert.match(settingsComponent, /export function Settings\(/);
-  assert.match(settingsComponent, /export function ThemePicker\(/);
+  assert.match(settingsComponent, /export \{ ThemePicker \} from "\.\/ThemePicker"/);
+  assert.match(themePickerComponent, /export function ThemePicker\(/);
   assert.doesNotMatch(libraryComponent, /from "\.\.\/app\/page"/);
   assert.doesNotMatch(settingsComponent, /from "\.\.\/app\/page"/);
 });
@@ -88,13 +91,38 @@ test("frontend development and production servers bind only to localhost", () =>
   );
 });
 
-test("theme registry exposes thirteen unique locally persisted themes", () => {
+test("theme registry exposes thirteen static themes and three local dynamic themes", () => {
   const ids = [...themeRegistry.matchAll(/^\s+id: "([^"]+)",$/gm)].map((match) => match[1]);
-  assert.deepEqual(ids, expectedThemes);
-  assert.equal(new Set(ids).size, 13);
+  assert.deepEqual(ids.slice(0, expectedThemes.length), expectedThemes);
+  assert.deepEqual(ids.slice(expectedThemes.length), [
+    "sakura-valley-motion",
+    "ocean-dawn-motion",
+    "aurora-snowfield-motion",
+  ]);
+  assert.equal(new Set(ids).size, 16);
   assert.match(themeRegistry, /DEFAULT_THEME_ID: ThemeId = "classic-night"/);
-  assert.match(themeProvider, /window\.localStorage\.setItem\(THEME_STORAGE_KEY, next\)/);
+  assert.match(themeProvider, /THEME_SELECTION_STORAGE_KEY/);
+  assert.match(themeProvider, /window\.localStorage\.setItem\(THEME_STORAGE_KEY, baseThemeId\)/);
   assert.match(themeProvider, /document\.documentElement\.dataset\.theme = definition\.id/);
+});
+
+test("dynamic themes ship bounded local MP4, WebM and poster assets", async () => {
+  for (const id of ["sakura-valley", "ocean-dawn", "aurora-snowfield"]) {
+    for (const extension of ["mp4", "webm"]) {
+      const asset = await stat(new URL(`../public/themes/dynamic/${id}.${extension}`, import.meta.url));
+      assert.ok(asset.size > 0 && asset.size <= 8 * 1024 * 1024);
+    }
+  }
+  const poster = await stat(new URL("../public/themes/dynamic/sakura-valley-poster.webp", import.meta.url));
+  assert.ok(poster.size > 0 && poster.size <= 250 * 1024);
+  assert.match(themeBackdrop, /muted/);
+  assert.match(themeBackdrop, /loop/);
+  assert.match(themeBackdrop, /playsInline/);
+  assert.match(themeBackdrop, /prefers-reduced-motion: reduce/);
+  assert.match(themeBackdrop, /visibilitychange/);
+  assert.match(themeBackdrop, /preload=\{builtinVideo \? "auto" : "metadata"\}/);
+  assert.match(themeBackdrop, /onLoadedData/);
+  assert.match(themeBaseStyles, /theme-wallpaper-motion\.ready/);
 });
 
 test("each theme has isolated CSS and a local background asset", async () => {
@@ -371,14 +399,22 @@ test("sidebar ambient scenes exist for non-classic themes", () => {
   assert.match(themeBaseStyles, /volcanic-forge[^}]*--ambient-symbol:"火"/s);
 });
 
-test("theme picker and background preferences remain local", () => {
-  assert.match(page, /role="radiogroup" aria-label="界面主题"/);
+test("theme picker supports static, dynamic and custom semantic palettes", () => {
+  assert.match(themePickerComponent, /role="radiogroup" aria-label="内置静态主题"/);
+  assert.match(themePickerComponent, /role="radiogroup" aria-label="内置动态主题"/);
+  assert.match(themePickerComponent, /role="radiogroup" aria-label="我的自定义主题"/);
   assert.match(page, /className={`theme-card/);
   assert.match(page, /className="theme-preview"/);
   assert.match(page, /className="background-intensity"/);
-  assert.match(page, /aria-label="背景显现度"/);
+  assert.match(themePickerComponent, /aria-label="背景显现度"/);
+  assert.match(themePickerComponent, /PALETTE_FIELDS\.map/);
+  assert.match(themePickerComponent, /paletteContrastWarnings/);
+  assert.match(api, /createTheme\(/);
+  assert.match(api, /updateTheme\(/);
+  assert.match(api, /deleteTheme\(/);
   assert.match(themeProvider, /BACKGROUND_INTENSITY_STORAGE_KEY/);
   assert.match(themeProvider, /setBackgroundIntensity/);
+  assert.match(themeProvider, /THEME_MOTION_STORAGE_KEY/);
 });
 
 test("chat appends user input before awaiting streamed response", () => {

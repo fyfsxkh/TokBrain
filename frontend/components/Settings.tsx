@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, FormEvent } from "react";
+import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
@@ -13,50 +13,9 @@ import type {
 } from "../lib/api";
 import { reason } from "../lib/errors";
 import type { PerformOperation } from "../lib/uiTypes";
-import { useTheme } from "../themes/ThemeProvider";
-import type { ThemeDefinition } from "../themes/registry";
+import { ThemePicker as ThemePickerControl } from "./ThemePicker";
 
-export function ThemePicker() {
-  const { theme, themes, setTheme, backgroundIntensity, setBackgroundIntensity } = useTheme();
-  return (
-    <section className="card theme-picker">
-      <div className="section-head">
-        <div><span className="kicker">界面皮肤</span><h2>选择主题</h2></div>
-        <span className="theme-current"><b>{theme.mark}</b>{theme.name}</span>
-      </div>
-      <div className="theme-grid" role="radiogroup" aria-label="界面主题">
-        {themes.map((item) => (
-          <button
-            type="button"
-            role="radio"
-            aria-checked={item.id === theme.id}
-            className={`theme-card ${item.id === theme.id ? "selected" : ""}`}
-            key={item.id}
-            onClick={() => setTheme(item.id)}
-            style={themePreviewStyle(item)}
-          >
-            <span className="theme-preview"><span className="theme-badge">{item.mark}</span></span>
-            <span className="theme-card-copy"><strong>{item.name}</strong><small>{item.description}</small></span>
-          </button>
-        ))}
-      </div>
-      <label className="background-intensity">
-        <span><strong>背景显现度</strong><small>调整主题背景图的可见程度</small></span>
-        <input aria-label="背景显现度" type="range" min="0" max="100" value={backgroundIntensity} onChange={(event) => setBackgroundIntensity(Number(event.target.value))} />
-        <output>{backgroundIntensity}%</output>
-      </label>
-    </section>
-  );
-}
-
-function themePreviewStyle(theme: ThemeDefinition) {
-  return {
-    "--preview-bg": theme.preview[0],
-    "--preview-surface": theme.preview[1],
-    "--preview-accent": theme.preview[2],
-    "--preview-text": theme.preview[3],
-  } as CSSProperties;
-}
+export { ThemePicker } from "./ThemePicker";
 
 const HEALTH_PROBE_NAMES = ["database", "media_runtime", "coordinators", "security_cleanup"] as const;
 
@@ -312,7 +271,7 @@ export function Settings({
   return (
     <div className="settings-layout">
       <form className="stack" onSubmit={save}>
-        <ThemePicker />
+        <ThemePickerControl />
         {settings.security_cleanup_required && (
           <section className="risk-notice"><strong>敏感残留尚未清理</strong><p>{settings.security_cleanup_message}</p></section>
         )}

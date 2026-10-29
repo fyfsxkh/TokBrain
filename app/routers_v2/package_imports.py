@@ -3,7 +3,6 @@
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import get_db
 from app.schemas import PackageImportBatchCreate
 from app.services.import_integrations import IntegrationImportError
@@ -13,27 +12,14 @@ from app.services.package_imports import (
     queue_package_analysis,
     upload_package_file,
 )
+from app.services.request_security import require_same_origin
 
 
 router = APIRouter(prefix="/api/package-import-batches", tags=["package-imports"])
 
 
 def _same_origin(request: Request) -> None:
-    origin = request.headers.get("origin")
-    if origin not in {
-        *settings.allowed_origins,
-        "http://testserver",
-        "https://testserver",
-    }:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "same_origin_required",
-                "message": "该上传接口只能由 TokBrain 本机网页调用",
-                "retryable": False,
-                "field": "Origin",
-            },
-        )
+    require_same_origin(request)
 
 
 def _raise(exc: IntegrationImportError) -> None:

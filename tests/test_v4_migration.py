@@ -12,6 +12,7 @@ from app.services.migrations import (
     migrate_to_v7,
     migrate_to_v8,
     migrate_to_v9,
+    migrate_to_v10,
     schema_upgrade_needed,
 )
 
@@ -204,7 +205,7 @@ def test_v4_migration_backs_up_merges_accounts_and_drops_legacy_tables(tmp_path)
     backup = backup_before_upgrade(path)
     assert backup and backup.is_file()
     assert backup.parent == tmp_path / "backups"
-    assert "pre-v9" in backup.name
+    assert "pre-v10" in backup.name
 
     migrate_to_v4(path)
     assert not schema_upgrade_needed(path)
@@ -675,5 +676,52 @@ def test_v9_adds_evidence_state_and_quarantines_only_restricted_title_notes(
             )["version"]
             == 9
         )
+    finally:
+        connection.close()
+
+
+def test_v10_adds_custom_themes_without_losing_v9_settings(tmp_path):
+    path = tmp_path / "douyin_rag.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE app_settings (
+          key TEXT PRIMARY KEY, value JSON NOT NULL, updated_at DATETIME NOT NULL
+        );
+        INSERT INTO app_settings(key, value, updated_at) VALUES
+          ('schema', '{"version": 9}', '2026-08-12T00:00:00+00:00'),
+          ('runtime', '{"kept": true}', '2026-08-12T00:00:00+00:00');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    migrate_to_v10(path)
+    migrate_to_v10(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(custom_themes)")
+        }
+        assert {
+            "id",
+            "name",
+            "source_theme_id",
+            "media_kind",
+            "stored_path",
+            "poster_path",
+            "palette",
+        } <= columns
+        assert json.loads(
+            connection.execute(
+                "SELECT value FROM app_settings WHERE key='schema'"
+            ).fetchone()[0]
+        )["version"] == 10
+        assert json.loads(
+            connection.execute(
+                "SELECT value FROM app_settings WHERE key='runtime'"
+            ).fetchone()[0]
+        ) == {"kept": True}
     finally:
         connection.close()

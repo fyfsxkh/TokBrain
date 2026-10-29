@@ -46,6 +46,33 @@ class SecretRecord(Base):
     )
 
 
+class CustomTheme(Base):
+    """A user-authored semantic palette with optional local wallpaper media."""
+
+    __tablename__ = "custom_themes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    source_theme_id: Mapped[str] = mapped_column(String(80), index=True)
+    media_kind: Mapped[str] = mapped_column(
+        String(20), default="inherited", server_default="inherited"
+    )
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    stored_path: Mapped[str | None] = mapped_column(Text)
+    poster_path: Mapped[str | None] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    sha256: Mapped[str | None] = mapped_column(String(64), index=True)
+    width: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    height: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0, server_default="0")
+    palette: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 class Collection(Base):
     """A static local label. Historical Douyin folders are never refreshed."""
 

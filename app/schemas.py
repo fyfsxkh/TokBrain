@@ -12,6 +12,34 @@ SupplementState = Literal["none", "required", "uploaded", "processing", "failed"
 EvidenceState = Literal["unverified", "sufficient", "insufficient"]
 
 
+class CustomThemeView(BaseModel):
+    id: str
+    name: str
+    source_theme_id: str
+    media_kind: Literal["inherited", "static", "dynamic"]
+    mime_type: str | None = None
+    size_bytes: int = 0
+    sha256: str | None = None
+    width: int = 0
+    height: int = 0
+    duration_seconds: float = 0
+    palette: dict[str, str]
+    content_url: str | None = None
+    poster_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CustomThemeList(BaseModel):
+    items: list[CustomThemeView]
+
+
+class CustomThemeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    palette: dict[str, str] | None = None
+
+
 class SettingsView(BaseModel):
     daily_media_minutes_limit: float
     daily_llm_token_limit: int

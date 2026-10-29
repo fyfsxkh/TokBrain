@@ -69,6 +69,12 @@ $requiredFiles = @(
     "docs/screenshots/import-workspace.png",
     "docs/screenshots/knowledge-library.png",
     "docs/screenshots/grounded-chat.png",
+    "frontend/public/themes/dynamic/sakura-valley.mp4",
+    "frontend/public/themes/dynamic/sakura-valley.webm",
+    "frontend/public/themes/dynamic/ocean-dawn.mp4",
+    "frontend/public/themes/dynamic/ocean-dawn.webm",
+    "frontend/public/themes/dynamic/aurora-snowfield.mp4",
+    "frontend/public/themes/dynamic/aurora-snowfield.webm",
     ".env.example",
     "requirements.txt",
     "requirements-billing.txt",
@@ -157,7 +163,9 @@ $forbiddenFiles = @(
     $candidateFiles |
         ForEach-Object { $_.Replace('\', '/') } |
         Where-Object {
-            $_ -ne ".env.example" -and $_ -match $forbiddenPathPattern
+            $_ -ne ".env.example" -and
+                $_ -match $forbiddenPathPattern -and
+                $_ -notmatch '^frontend/public/themes/dynamic/[^/]+\.(mp4|webm)$'
         }
 )
 if ($forbiddenFiles.Count) {

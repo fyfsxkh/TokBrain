@@ -12,7 +12,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR.joinpath("data")
 _LOCAL_FRONTENDS = ("http://127.0.0.1:3000", "http://localhost:3000")
-_DATA_SUBDIRECTORIES = ("media", "keyframes", "tmp", "source-assets", "package-imports")
+_DATA_SUBDIRECTORIES = (
+    "media",
+    "keyframes",
+    "tmp",
+    "source-assets",
+    "package-imports",
+    "theme-assets",
+)
 
 
 class ApplicationSettings(BaseSettings):
